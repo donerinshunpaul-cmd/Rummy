@@ -856,7 +856,10 @@
         btns += '<button class="go small" data-a="declareSel" ' + (one ? '' : 'disabled') + '>Declare</button>';
       }
     }
-    const ptsLine = inDeal && !me.out ? '<div class="pts">Hand value: <b>' + R.evaluate(D.myGroups, wrKnown()).pts + '</b> pts' + (sel.size ? ' · ' + sel.size + ' selected' : ' · drag cards to arrange, or tap to select') + '</div>' : '';
+    // a pure sequence made after your first pick opens the joker only once you throw a card
+    const jokerSoon = inDeal && V.phase === 'play' && !D.revealed && D.myDrawn && R.evaluate(D.myGroups, R.NO_WILD).pure > 0;
+    const ptsLine = inDeal && !me.out ? '<div class="pts">Hand value: <b>' + R.evaluate(D.myGroups, wrKnown()).pts + '</b> pts' +
+      (jokerSoon ? ' · <b>joker opens after you throw a card</b>' : sel.size ? ' · ' + sel.size + ' selected' : ' · drag cards to arrange, or tap to select') + '</div>' : '';
 
     $app.innerHTML = '<div class="game">' +
       '<div class="topbar"><span>' + (V.solo ? 'vs Computer' : 'Room <b>' + esc(V.code) + '</b>') + ' · Deal ' + V.dealNo + (V.matchDeals ? ' of ' + V.matchDeals : '') + (V.mult > 1 ? ' <span class="tag" style="background:var(--gold);color:#2a2100">×2 points</span>' : '') + '</span><span class="grow"></span>' +
@@ -925,7 +928,7 @@
     } else if (modal === 'rules') {
       html = '<div class="modal-bg"><div class="modal rules"><h2>How to play</h2>' +
         '<p><b>Cards:</b> 3 decks with 2 printed jokers each (162 cards). The deck is shuffled once before each deal and its order never changes during the deal. Cards are dealt one at a time, 13 each.</p>' +
-        '<p><b>Closed joker:</b> one card is placed face-down under the deck. You see it only after you arrange your first <b>pure sequence</b> (3 or more cards). Then every card of that rank is a joker for you.</p>' +
+        '<p><b>Closed joker:</b> one card is placed face-down under the deck. You see it after you arrange your first <b>pure sequence</b> (3 or more cards) <b>and then throw a card</b>. Only if your dealt cards already make a pure sequence does it open before your first pick. Then every card of that rank is a joker for you.</p>' +
         '<p><b>Your turn:</b> pick from the Deck or the Open card, then throw one card onto the Open pile. Drag a card onto the pile, or tap it and press Discard.</p>' +
         '<p><b>Arranging:</b> drag cards between groups, onto <b>＋ New group</b>, or select several and press Group. <b>Auto-arrange</b> finds a good grouping.</p>' +
         '<p><b>Pure sequence:</b> 3+ in a row, same suit, no joker (4♥ 5♥ 6♥). <b>Pure group:</b> 3 identical cards, same number and same suit (7♥ 7♥ 7♥), count as a pure sequence. <b>Sequence:</b> jokers may fill gaps. <b>Impure group:</b> 2 identical cards plus a joker (2♦ 2♦ ★) count as a sequence with a joker. <b>Set:</b> 3–4 of the same number, different suits (9♣ 9♦ 9♠). <b>Only one set counts per hand</b>; a second set is not valid.</p>' +

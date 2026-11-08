@@ -51,12 +51,12 @@ Your 13 cards arrive sorted by suit. Drag cards to arrange them, in any order in
 
 - The whole deck is shuffled **once per deal** with secure randomness. Its order never changes during the deal, and cards are dealt one at a time around the table.
 - When the deck runs out, the open pile is **turned over (not shuffled)**, the way people do it at a real table.
-- The computer only sees its own cards and the open pile. It never sees the deck or anyone else's hand, and it can't see the closed joker until it makes its own pure sequence.
+- The computer only sees its own cards and the open pile. It never sees the deck or anyone else's hand, and it can't see the closed joker until it opens it by the same rule as you.
 
 ## Rules used
 
 - **3 decks with 2 printed jokers each** (162 cards). Each player gets 13 cards.
-- **Closed joker:** one card is placed face-down under the deck. Each player sees it only after they arrange their first **pure sequence** (3 or more cards). From then on, every card of that rank is a joker for that player. If the closed card is a printed joker, Aces are the jokers.
+- **Closed joker:** one card is placed face-down under the deck. Each player sees it after they arrange their first **pure sequence** (3 or more cards) **and then throw a card**. The only exception is the first round: if your dealt cards already make a pure sequence, it opens before your first pick. From then on, every card of that rank is a joker for that player. If the closed card is a printed joker, Aces are the jokers.
 - **Pure sequence:** 3+ consecutive cards of one suit with no joker.
 - **Pure group:** 3 identical cards, same number and same suit (e.g. 7♥ 7♥ 7♥), count as a **pure sequence**.
 - **Impure group:** 2 identical cards plus a joker (e.g. 2♦ 2♦ joker) count as a **sequence with a joker**.

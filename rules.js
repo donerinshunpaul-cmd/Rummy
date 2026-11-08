@@ -320,9 +320,12 @@
     order.forEach(pid => checkReveal(G, pid));
     return null;
   }
-  function checkReveal(G, pid) {
+  // The joker opens only after a throw (the end of your turn), if you then hold a pure sequence. One exception: before
+  // your first pick, a pure sequence in your dealt cards opens it at once. After someone declares, grouping may open it.
+  function checkReveal(G, pid, afterThrow) {
     const D = G.deal;
     if (!D || D.revealed[pid] || !D.hands[pid]) return;
+    if (!afterThrow && D.drawn[pid] && G.phase !== 'show') return;
     if (D.hands[pid].some(g => g.length >= 3 && isPureType(classify(g, NO_WILD)))) {
       D.revealed[pid] = true;
       log(D, nameOf(G, pid) + ' made a pure sequence and unlocked the joker.');
@@ -470,6 +473,7 @@
         moved = D.stock.length > 1 ? D.stock.pop() : null;
       }
       if (moved) D.discard.push(moved);
+      if (D.step === 'discard') checkReveal(G, t, true);   // their picked card went back: like a throw
       D.timeouts[t] = (D.timeouts[t] || 0) + 1;
       log(D, nameOf(G, t) + ' timed out — turn passed' + (moved ? ' (' + label(moved) + ' to the open pile)' : '') + '.');
       setAct(G, t, 'timeout', { card: moved, from: D.step === 'discard' ? 'hand' : 'stock' });
@@ -520,9 +524,9 @@
       let rest = hand.map(g => g.filter(x => x !== c)).filter(g => g.length);
       if (a.groups) { const g = cleanGroups(a.groups); if (sameCards(flat(g), flat(rest))) rest = g; }
       D.hands[pid] = rest; D.discard.push(c);
-      checkReveal(G, pid);
       setAct(G, pid, a.type, { card: c });
-      if (a.type === 'discard') { log(D, nameOf(G, pid) + ' discarded ' + label(c) + '.'); nextTurn(G); return null; }
+      if (a.type === 'discard') { log(D, nameOf(G, pid) + ' discarded ' + label(c) + '.'); checkReveal(G, pid, true); nextTurn(G); return null; }
+      checkReveal(G, pid, true);
       const ev = evaluate(rest, wrFor(D, pid));
       if (ev.valid) { log(D, nameOf(G, pid) + ' declared! Everyone else: group your cards.'); startShow(G, pid); }
       else { log(D, nameOf(G, pid) + ' made a wrong show (80 pts).'); endDeal(G, null, pid); }
@@ -550,8 +554,12 @@
   /** Perform one step of a computer player's turn (draw, or discard/declare). */
   function botStep(G, pid, rand) {
     const D = G.deal; if (!D || G.phase !== 'play' || D.order[D.turn] !== pid) return;
-    const wr = wrFor(D, pid);
     const hand = flat(D.hands[pid]);
+    if (D.step === 'draw' && !D.drawn[pid] && !D.revealed[pid]) {
+      // first turn: a pure sequence in the dealt cards opens the joker before the first pick
+      D.hands[pid] = bestArrangement(hand, NO_WILD, 'ai', 6000).groups; checkReveal(G, pid);
+    }
+    const wr = wrFor(D, pid);
     if (D.step === 'draw') {
       if (!D.drawn[pid] && activeIds(D).length > 2) {
         const first = bestArrangement(hand, wr, 'ai', 6000);
@@ -568,7 +576,6 @@
       act(G, pid, { type: 'draw', from }, rand);
       const h = flat(D.hands[pid]);
       D.hands[pid] = bestArrangement(h, wr, 'ai', 6000).groups;
-      checkReveal(G, pid);
       return;
     }
     const wr2 = wrFor(D, pid);
@@ -586,8 +593,7 @@
     D.hands[pid] = pick.arr.groups.concat([[pick.card]]);
     const ev = evaluate(pick.arr.groups, wr2);
     if (ev.valid) act(G, pid, { type: 'declare', card: pick.card, groups: pick.arr.groups }, rand);
-    else act(G, pid, { type: 'discard', card: pick.card }, rand);
-    if (G.phase === 'play') checkReveal(G, pid);
+    else act(G, pid, { type: 'discard', card: pick.card }, rand);   // act() opens the joker after the throw
   }
 
   /** What one player is allowed to see. */
@@ -607,7 +613,7 @@
         discardUnder: D.discard[D.discard.length - 2] || null, discardCount: D.discard.length,
         turnPid: D.order[D.turn], step: D.step, turnLeft: D.turnEnds ? Math.max(0, D.turnEnds - Date.now()) : null, turnMs: TURN_MS,
         timeouts: D.timeouts || {}, log: D.log.slice(-4), result: D.result, lastAct: la,
-        myGroups: D.hands[pid] || null, picked: D.order[D.turn] === pid ? D.picked : null,
+        myGroups: D.hands[pid] || null, picked: D.order[D.turn] === pid ? D.picked : null, myDrawn: !!D.drawn[pid],
         lastDrawn: D.lastDrawn[pid] || null, showMs: SHOW_MS };
       if (G.phase === 'show' && D.show) {   // everyone sees the winning hand while they group their own cards
         const w = D.show.winner;

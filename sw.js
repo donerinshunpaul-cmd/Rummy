@@ -1,5 +1,5 @@
 // Rummy Room service worker: makes the app installable and quick to open.
-const CACHE = 'rummyroom-v9';
+const CACHE = 'rummyroom-v10';
 const SHELL = ['./', 'index.html', 'app.js', 'rules.js', 'turn.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 const PEERJS = ['https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js', 'https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js'];
