@@ -4,18 +4,37 @@
   'use strict';
   const R = window.Rules;
   const PREFIX = 'rummyroom-v2-';
-  const PEERJS_URL = 'https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js';
-  // Free public STUN servers. To help friends on strict mobile networks, add a TURN server here
-  // (e.g. a free key from metered.ca):  { urls: 'turn:...', username: '...', credential: '...' }
-  const ICE = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }];
-  const PEER_OPTS = { config: { iceServers: ICE }, debug: 1 };
+  // PeerJS library, with a second CDN in case the first is slow or blocked
+  const PEERJS_URLS = ['https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js', 'https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js'];
+  // Free public STUN servers. Relay (TURN) servers come from turn.js; they let phones on mobile data connect.
+  const STUN = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] }, { urls: 'stun:stun.cloudflare.com:3478' }];
+  const NET_ERRORS = ['network', 'server-error', 'socket-error', 'socket-closed', 'disconnected'];
+  const HB_PING_MS = 4000;      // host → guests heartbeat
+  const HB_OFFLINE_MS = 15000;  // no word for this long = shown as offline
+  const HB_DEAD_MS = 45000;     // host closes a connection that has been silent this long
+  const JOIN_TIMEOUT_MS = 25000;
 
   // ---------- storage & utils ----------
+  // Testing switch: ?as=Name makes that tab a separate player (own id, name and saved games) in the same browser.
+  const AS = (new URLSearchParams(location.search).get('as') || '').replace(/[^\w-]/g, '').slice(0, 16);
+  const NS = 'rr-' + (AS ? AS + '-' : '');
   const store = {
-    get(k, d) { try { const v = localStorage.getItem('rr-' + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
-    set(k, v) { try { localStorage.setItem('rr-' + k, JSON.stringify(v)); } catch (e) {} },
-    del(k) { try { localStorage.removeItem('rr-' + k); } catch (e) {} }
+    get(k, d) { try { const v = localStorage.getItem(NS + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
+    set(k, v) { try { localStorage.setItem(NS + k, JSON.stringify(v)); } catch (e) {} },
+    del(k) { try { localStorage.removeItem(NS + k); } catch (e) {} }
   };
+  // Invite links carry the room code after '#', which never reaches the web host's server logs. Old ?room= links still work.
+  function linkRoomCode() {
+    const m = (location.hash || '').replace(/^#/, '').match(/^(?:room=)?([A-Za-z0-9]{4,6})$/);
+    return ((m && m[1]) || new URLSearchParams(location.search).get('room') || '').toUpperCase();
+  }
+  let linkCode = linkRoomCode();
+  function clearLinkFromUrl() {   // keep the address bar clean once the code has been used
+    const u = new URL(location.href);
+    if (!u.hash && !u.searchParams.has('room')) return;
+    u.searchParams.delete('room'); u.hash = '';
+    try { history.replaceState(null, '', u.pathname + u.search); } catch (e) {}
+  }
   const rid = n => Array.from(crypto.getRandomValues(new Uint8Array(n)), b => 'abcdefghijkmnpqrstuvwxyz23456789'[b % 32]).join('');
   const genCode = () => Array.from({ length: 5 }, () => 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'[R.secureInt(31)]).join('');
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -24,19 +43,27 @@
   const wait = (a, b) => (a + Math.random() * (b - a)) / (FAST ? 8 : 1);
 
   let myId = store.get('pid'); if (!myId) { myId = rid(12); store.set('pid', myId); }
-  let myName = store.get('name', '');
+  let myName = store.get('name', AS);
 
   // ---------- state ----------
   let mode = null;          // 'solo' | 'host' | 'guest' | null
   let screen = 'home';      // when mode is null: 'home' | 'ai' | 'friends'
   let code = null, G = null, V = null;
-  let peer = null, hostConn = null, retryTimer = null, joinFails = 0, botTimer = null;
+  let peer = null, hostConn = null, retryTimer = null, botTimer = null;
   const conns = new Map();
   let sel = new Set();
   let modal = null, lastModal = '';
   let nBots = store.get('nbots', 2);
   let matchDeals = store.get('deals', 0);           // 0 = unlimited, else fixed (min 3)
   let arrangePref = store.get('arrange', 'sorted');  // 'sorted' | 'dealt'
+  let botSpeed = store.get('botspeed', 'normal');     // 'quick' | 'normal' | 'slow'
+  // computer pauses in ms: draw = before picking, think = before throwing, long = [chance, extra ms] of a longer think
+  const BOT_PACE = {
+    quick: { draw: [800, 1600], think: [700, 1600], long: [0.15, 800] },
+    normal: { draw: [1300, 2300], think: [1800, 3400], long: [0.2, 1500] },
+    slow: { draw: [2200, 3600], think: [3000, 5500], long: [0.25, 2500] }
+  };
+  const SPEED_LABEL = { quick: 'Quick', normal: 'Normal', slow: 'Slow' };
   let arrangedDeal = -1;
   let lastTurnMine = false, wakeLock = null;
   // animation memory
@@ -50,16 +77,40 @@
 
   // ---------- PeerJS (only loaded for Play with Friends, so AI mode works fully offline) ----------
   let peerLoading = null;
-  function loadPeer() {
-    if (window.Peer) return Promise.resolve();
-    if (peerLoading) return peerLoading;
-    peerLoading = new Promise((ok, fail) => {
-      const s = document.createElement('script'); s.src = PEERJS_URL; s.onload = ok;
-      s.onerror = () => { peerLoading = null; s.remove(); fail(new Error('offline')); };
+  function loadScript(src, ms) {
+    return new Promise((ok, fail) => {
+      const s = document.createElement('script'); s.src = src; s.async = true;
+      const t = setTimeout(() => { fail(new Error('timeout')); }, ms);
+      s.onload = () => { clearTimeout(t); if (window.Peer) ok(); else fail(new Error('no Peer')); };
+      s.onerror = () => { clearTimeout(t); s.remove(); fail(new Error('offline')); };
       document.head.appendChild(s);
     });
+  }
+  function loadPeer() {
+    if (window.Peer) return Promise.resolve();
+    if (!peerLoading) {
+      peerLoading = PEERJS_URLS.reduce((p, url) => p.catch(() => (window.Peer ? undefined : loadScript(url, 10000))), Promise.reject(new Error('start')))
+        .catch(e => { peerLoading = null; if (window.Peer) return; throw e; });
+    }
     return peerLoading;
   }
+  // STUN + relay servers. turn.js can list relay servers directly (RUMMY_TURN) or give a URL that returns them (RUMMY_TURN_URL).
+  let iceList = null;
+  function iceServers() {
+    if (iceList) return iceList;
+    const fixed = Array.isArray(window.RUMMY_TURN) ? window.RUMMY_TURN.filter(s => s && s.urls) : [];
+    const url = typeof window.RUMMY_TURN_URL === 'string' ? window.RUMMY_TURN_URL.trim() : '';
+    let fetched = Promise.resolve([]);
+    if (url) {
+      const ctl = window.AbortController ? new AbortController() : null;
+      const t = setTimeout(() => ctl && ctl.abort(), 6000);
+      fetched = fetch(url, ctl ? { signal: ctl.signal } : {}).then(r => r.json()).then(l => (Array.isArray(l) ? l.filter(s => s && s.urls) : []))
+        .catch(() => { iceList = null; return []; }).finally(() => clearTimeout(t));
+    }
+    iceList = fetched.then(extra => STUN.concat(fixed, extra));
+    return iceList;
+  }
+  const peerOpts = ice => ({ config: { iceServers: ice }, debug: 1 });
 
   // ---------- SOLO (vs computer, offline) ----------
   function soloStart(resume) {
@@ -90,8 +141,10 @@
     const D = G.deal, pid = D.order[D.turn];
     const p = G.players.find(x => x.id === pid);
     if (!p || !p.bot) return;
-    // human-like pauses: a moment to look at the open card, a little longer to decide what to throw
-    const ms = Math.min(4500, D.step === 'draw' ? wait(800, 1600) : wait(700, 1600) + (Math.random() < 0.15 ? 800 : 0));
+    // human-like pauses: a moment to look at the open card, longer to decide what to throw, now and then a long think
+    const pace = BOT_PACE[botSpeed] || BOT_PACE.normal;
+    const ms = D.step === 'draw' ? wait(pace.draw[0], pace.draw[1])
+      : wait(pace.think[0], pace.think[1]) + (Math.random() < pace.long[0] ? pace.long[1] / (FAST ? 8 : 1) : 0);
     botTimer = setTimeout(() => {
       botTimer = null;
       if (mode !== 'solo' || !G.deal || G.deal.order[G.deal.turn] !== pid) return;
@@ -100,100 +153,441 @@
     }, ms);
   }
 
+  // ---------- ROOM ADDRESSES & HAND-OVER ----------
+  // A room's address is its code. One other player is the backup host: the host keeps that phone updated with the game.
+  // If the host leaves or vanishes, the backup takes over at the next address (CODE-1, CODE-2, …) and also claims the
+  // plain code again, so players can still join with it. Everyone else finds the new host by trying both addresses.
+  const roomAddr = e => PREFIX + code + (e ? '-' + e : '');
+  const GRACE_MS = 10000;   // how long players wait for a vanished host before the backup takes over
+  const onlineCount = () => (G ? G.players.filter(p => !p.bot && p.online).length : 0);
+  // two devices both hosting the same room (rare race): the one with more players keeps it, then the newer one
+  const probeWins = (a, b) => (a.n !== b.n ? a.n > b.n : (a.epoch || 0) !== (b.epoch || 0) ? (a.epoch || 0) > (b.epoch || 0) : String(a.pid) > String(b.pid));
+
   // ---------- HOST ----------
+  let deputyPid = null, snapTimer = null, basePeer = null, baseTimer = null, prevAddr = null, probeUntil = 0, lastProbe = 0, hostLeaving = false;
   async function hostStart(resume) {
     try { await loadPeer(); } catch (e) { toast('Play with Friends needs an internet connection.'); return; }
-    mode = 'host';
-    G = resume || Object.assign(R.newGame(genCode(), { id: myId, name: myName }), { matchDeals });
-    code = G.code;
+    clearLinkFromUrl();
+    if (resume) {   // coming back to a saved room: if another player took it over meanwhile, join them instead
+      code = resume.code;
+      status('Checking room ' + code + '…');
+      const live = await findLiveHost(resume.epoch || 0);
+      status('');
+      if (mode) return;
+      if (live) { nlog('room is hosted elsewhere now → ' + live); store.del('hostGame'); guestJoin(resume.code, live); toast('Someone else is hosting now — joining as a player'); return; }
+      probeUntil = Date.now() + 600000; lastProbe = 0;   // keep checking for a newer host that the first check missed
+    }
+    hostBegin(resume || Object.assign(R.newGame(genCode(), { id: myId, name: myName }), { matchDeals }));
+  }
+  function hostBegin(g) {
+    mode = 'host'; G = g; code = G.code;
     G.players.forEach(p => { p.online = p.id === myId; });
     if (G.deal && G.phase === 'play' && G.deal.turnEnds) G.deal.turnEnds = Date.now() + R.TURN_MS; // fresh time after a pause
     store.set('last', { mode: 'host', code });
     openHostPeer(); commit();
   }
+  // Ask some room addresses whether a host already runs there. Resolves with that host's reply (+ addr) if it should
+  // keep the room rather than us, else null (nobody there, or we have the better claim).
+  function probeAddrs(targets, mine, ms) {
+    return new Promise(resolve => {
+      let done = false, dead = 0, p = null;
+      const finish = r => { if (done) return; done = true; clearTimeout(t); setTimeout(() => { try { p && p.destroy(); } catch (x) {} }, 300); resolve(r); };
+      const t = setTimeout(() => finish(null), ms || 5000);
+      iceServers().then(ice => {
+        if (done) return;
+        p = new Peer(peerOpts(ice));
+        p.on('open', () => targets.forEach(addr => {
+          const c = p.connect(addr, { reliable: true });
+          c.on('open', () => c.send({ t: 'probe', n: mine.n, epoch: mine.epoch, pid: myId }));
+          c.on('data', m => { if (m && m.t === 'probe' && m.pid !== myId) { nlog('probe: ' + addr.slice(PREFIX.length) + ' has ' + m.n + ' online'); finish(probeWins(mine, m) ? null : Object.assign({ addr }, m)); } });
+        }));
+        p.on('error', err => {
+          nlog('probe error ' + err.type);
+          if (err.type === 'peer-unavailable') { if (++dead >= targets.length) finish(null); }
+          else if (!NET_ERRORS.includes(err.type)) finish(null);   // a server hiccup: keep waiting for answers until the timeout
+        });
+      });
+    });
+  }
+  function findLiveHost(e) {   // before reopening a saved room: is it already hosted at the next address or the plain code?
+    return probeAddrs([...new Set([roomAddr(e + 1), roomAddr(0)])], { n: 1, epoch: e, pid: myId }, 8000).then(r => (r ? r.addr : null));
+  }
+  // The room lives on the host's PeerJS id. The PeerJS server is only needed for new joins: if the host's link to it
+  // drops, games already connected keep running, so we reconnect quietly and never tear down players' connections.
+  let hostGen = 0, hostRetryTimer = null, lastPing = 0;
+  function hostConnection(conn) {
+    conn.on('data', m => onHostMsg(conn, m));
+    conn.on('close', () => dropConn(conn));
+    conn.on('error', () => dropConn(conn));
+  }
   function openHostPeer() {
     if (mode !== 'host') return;
-    status('Opening room…');
-    peer = new Peer(PREFIX + code, PEER_OPTS);
-    peer.on('open', () => status(''));
-    peer.on('connection', conn => {
-      conn.on('data', m => onHostMsg(conn, m));
-      conn.on('close', () => dropConn(conn));
-      conn.on('error', () => dropConn(conn));
+    clearTimeout(hostRetryTimer); hostRetryTimer = null;
+    const my = ++hostGen;
+    if (!conns.size) status('Opening room…');
+    iceServers().then(ice => {
+      if (my !== hostGen || mode !== 'host') return;
+      if (peer && !peer.destroyed) peer.destroy();
+      const p = peer = new Peer(roomAddr(G.epoch || 0), peerOpts(ice));
+      p.on('open', () => { if (p !== peer) return; p.rrOpened = true; status(''); nlog('hosting at ' + p.id.slice(PREFIX.length)); });
+      p.on('connection', hostConnection);
+      if (G.epoch) claimBase(ice);
+      p.on('disconnected', () => { if (p === peer) hostServerRetry(p, 1500); });
+      p.on('error', e => {
+        if (p !== peer || mode !== 'host') return;
+        if (e.type === 'unavailable-id') { p.rrTaken = true; hostServerRetry(p, p.rrOpened ? 5000 : 1500); }
+        else if (NET_ERRORS.includes(e.type)) hostServerRetry(p, 3000);
+        else console.warn('peer error', e.type);
+      });
     });
-    peer.on('disconnected', () => setTimeout(() => { if (peer && !peer.destroyed && peer.disconnected) peer.reconnect(); }, 1500));
-    peer.on('error', e => {
-      if (mode !== 'host') return;
-      if (e.type === 'unavailable-id') { status('Reopening room ' + code + '… (can take up to a minute)'); peer.destroy(); setTimeout(openHostPeer, 4000); }
-      else if (['network', 'server-error', 'socket-error', 'socket-closed', 'disconnected'].includes(e.type)) {
-        status('Connection lost, retrying…');
-        setTimeout(() => { if (!peer || peer.destroyed) openHostPeer(); else if (peer.disconnected) peer.reconnect(); }, 3000);
-      } else console.warn('peer error', e.type);
+  }
+  function hostServerRetry(p, ms) {
+    if (hostRetryTimer) return;
+    hostRetryTimer = setTimeout(() => {
+      hostRetryTimer = null;
+      if (mode !== 'host' || p !== peer) return;
+      if (p.destroyed) {   // first open failed: our address is taken
+        status('Reopening room ' + code + '… (can take up to a minute)');
+        if (!p.rrTaken) { openHostPeer(); return; }
+        // is it a live host (another player took the room over), or just our own old connection the server hasn't dropped yet?
+        const e = G.epoch || 0;
+        probeAddrs([roomAddr(e)], { n: onlineCount(), epoch: e, pid: myId }, 6000).then(r => {
+          if (mode !== 'host' || p !== peer) return;
+          if (r) stepDown(r.epoch || 0); else hostRetryTimer = setTimeout(() => { hostRetryTimer = null; openHostPeer(); }, 2500);
+        });
+      } else if (p.disconnected) {
+        if (!conns.size) status('Reconnecting…');
+        try { p.reconnect(); } catch (x) { openHostPeer(); }
+      }
+    }, ms);
+  }
+  function claimBase(ice) {   // after a takeover: also answer on the plain room code, for players joining with it
+    clearTimeout(baseTimer); baseTimer = null;
+    if (mode !== 'host' || !G.epoch || (basePeer && !basePeer.destroyed)) return;
+    const b = basePeer = new Peer(roomAddr(0), peerOpts(ice));
+    b.on('open', () => nlog('also answering at ' + code));
+    b.on('connection', hostConnection);
+    const again = () => {
+      clearTimeout(baseTimer);
+      baseTimer = setTimeout(() => {
+        if (b !== basePeer || mode !== 'host') return;
+        if (b.destroyed) { basePeer = null; claimBase(ice); }
+        else if (b.disconnected) { try { b.reconnect(); } catch (x) { b.destroy(); basePeer = null; claimBase(ice); } }
+      }, 6000);
+    };
+    b.on('disconnected', () => { if (b === basePeer) again(); });
+    b.on('error', e => { if (b === basePeer && (e.type === 'unavailable-id' || NET_ERRORS.includes(e.type))) again(); });
+  }
+  function hostProbeTick() {   // after a takeover or a resume, look for another device that also hosts this room
+    if (mode !== 'host' || !peer || !peer.open || Date.now() > probeUntil || Date.now() - lastProbe < 10000) return;
+    lastProbe = Date.now();
+    const e = G.epoch || 0, mine = [roomAddr(e)].concat(basePeer && basePeer.open ? [roomAddr(0)] : []);
+    [...new Set([prevAddr, roomAddr(e + 1), roomAddr(0)])].filter(a => a && !mine.includes(a)).forEach(addr => {
+      const c = peer.connect(addr, { reliable: true });
+      const t = setTimeout(() => { try { c.close(); } catch (x) {} }, 6000);
+      c.on('open', () => c.send({ t: 'probe', n: onlineCount(), epoch: G.epoch || 0, pid: myId }));
+      c.on('data', m => {
+        if (!m || m.t !== 'probe' || m.pid === myId) return;
+        clearTimeout(t); setTimeout(() => { try { c.close(); } catch (x) {} }, 300);
+        if (mode === 'host' && !probeWins({ n: onlineCount(), epoch: G.epoch || 0, pid: myId }, m)) stepDown(m.epoch || 0);
+      });
     });
+  }
+  function stepDown(e) {   // another device runs this room with more players: hand our players over and join it
+    if (mode !== 'host') return;
+    const addr = roomAddr(e), c = code;
+    nlog('another host has the room → joining ' + addr.slice(PREFIX.length));
+    for (const x of conns.values()) { try { x.conn.send({ t: 'moved', addr }); } catch (y) {} }
+    setTimeout(() => { if (mode !== 'host' || code !== c) return; leave('end'); guestJoin(c, addr); }, 700);
+  }
+  function pickDeputy() {   // the backup host: a connected player whose app is open on screen; keep the current one while it qualifies
+    const live = pid => [...conns.values()].find(e => e.pid === pid && e.conn.open && e.hb && !e.quiet);
+    const ok = pid => { const p = G.players.find(x => x.id === pid); return p && !p.bot && p.online && pid !== myId && !!live(pid); };
+    const awake = pid => ok(pid) && live(pid).vis !== false;   // a phone with the app in the background may be paused and can't take over
+    if (deputyPid && awake(deputyPid)) return deputyPid;
+    const p = G.players.find(x => awake(x.id)) || (deputyPid && ok(deputyPid) ? { id: deputyPid } : G.players.find(x => ok(x.id)));
+    return p ? p.id : null;
+  }
+  function scheduleSnap(now) {
+    if (!deputyPid) return;
+    if (now) { clearTimeout(snapTimer); snapTimer = null; sendSnap(); return; }
+    if (!snapTimer) snapTimer = setTimeout(() => { snapTimer = null; sendSnap(); }, 400);
+  }
+  function sendSnap() {   // the backup host's copy of the whole game, so it can carry on if we disappear
+    if (mode !== 'host' || !deputyPid) return;
+    for (const e of conns.values()) if (e.pid === deputyPid && e.conn.open) { try { e.conn.send({ t: 'snap', g: G }); } catch (x) {} return; }
+  }
+  function hostLeave(kind) {   // 'handover': the backup host carries on; 'end': close the room for everyone
+    if (mode !== 'host') return;
+    const open = [...conns.values()].filter(x => x.conn.open).map(x => x.conn);
+    const c = code, next = (G.epoch || 0) + 1, handing = kind === 'handover' && !!deputyPid;
+    hostLeaving = true;   // from here on nothing changes: no new backup host, no new copies of the game
+    if (handing) sendSnap();
+    for (const x of open) { try { x.send(kind === 'end' ? { t: 'ended' } : { t: 'bye', epoch: next, deputy: deputyPid }); } catch (y) {} }
+    status(kind === 'end' ? 'Ending the room…' : 'Handing the room over…');
+    whenFlushed(open, 1500).then(() => {
+      if (mode !== 'host' || code !== c) return;
+      if (kind === 'end') { leave('end'); return; }
+      if (handing) { store.del('hostGame'); lastEpoch = next; }
+      leave('pause');
+      if (handing) store.set('last', { mode: 'guest', code: c, epoch: next, paused: true });
+      render();
+    });
+  }
+  function whenFlushed(cs, max) {   // wait until queued messages have left, so closing doesn't cut them off
+    return new Promise(res => {
+      const t0 = Date.now();
+      (function chk() {
+        const busy = cs.some(c => c.open && ((c.dataChannel && c.dataChannel.bufferedAmount) || c.bufferSize));
+        if (!busy || Date.now() - t0 > max) setTimeout(res, 200); else setTimeout(chk, 50);
+      })();
+    });
+  }
+  function setOnline(pid, on) {
+    const p = G && G.players.find(x => x.id === pid);
+    if (!p || p.online === on) return false;
+    if (!on && [...conns.values()].some(x => x.pid === pid && x.conn.open && !x.quiet)) return false;
+    p.online = on; return true;
   }
   function onHostMsg(conn, m) {
     if (!m || typeof m !== 'object') return;
+    const e = conns.get(conn.connectionId);
+    if (e) {
+      e.seen = Date.now();
+      if (m.t === 'pong') { e.hb = true; e.vis = m.vis !== false; if (pickDeputy() !== deputyPid) publish(); }   // publish moves the backup host role
+      if (e.quiet) { e.quiet = false; if (setOnline(e.pid, true)) publish(); }
+    }
+    if (m.t === 'probe') {   // another device also thinks it hosts this room
+      if (m.pid === myId) return;
+      const mine = { n: onlineCount(), epoch: G.epoch || 0, pid: myId };
+      try { conn.send({ t: 'probe', n: mine.n, epoch: mine.epoch, pid: myId }); } catch (y) {}
+      if (!probeWins(mine, m)) setTimeout(() => stepDown(m.epoch || 0), 300);
+      return;
+    }
     if (m.t === 'join') {
       const err = R.addPlayer(G, String(m.pid).slice(0, 20), String(m.name || 'Player').slice(0, 16));
       if (err) { conn.send({ t: 'err', msg: err, fatal: true }); return; }
-      for (const [k, e] of conns) if (e.pid === m.pid && e.conn !== conn) { conns.delete(k); try { e.conn.close(); } catch (x) {} }
-      conns.set(conn.connectionId, { conn, pid: m.pid });
+      for (const [k, x] of conns) if (x.pid === m.pid && x.conn !== conn) { conns.delete(k); try { x.conn.close(); } catch (y) {} }
+      conns.set(conn.connectionId, { conn, pid: m.pid, seen: Date.now(), hb: false, quiet: false });
       commit();
+      try { conn.send({ t: 'ping' }); } catch (y) {}
     } else if (m.t === 'act') {
-      const e = conns.get(conn.connectionId); if (!e) return;
+      if (!e) return;
       const err = R.act(G, e.pid, m.a || {});
       if (err) conn.send({ t: 'err', msg: err });
       commit();
+    } else if (m.t === 'hi') {   // a guest's app came back to the foreground: send a fresh view
+      if (e && conn.open) { try { conn.send({ t: 'state', v: viewFor(e.pid) }); } catch (y) {} }
     }
   }
   function dropConn(conn) {
     const e = conns.get(conn.connectionId); if (!e) return;
     conns.delete(conn.connectionId);
-    const still = [...conns.values()].some(x => x.pid === e.pid);
-    const p = G && G.players.find(x => x.id === e.pid);
-    if (p && !still) { p.online = false; publish(); }
+    if (setOnline(e.pid, false)) publish();
+  }
+  function hostTick() {   // heartbeat: ping guests, mark silent ones offline, clean up dead connections
+    if (mode !== 'host' || !G) return;
+    const now = Date.now(), ping = now - lastPing >= HB_PING_MS;
+    if (ping) lastPing = now;
+    let changed = false;
+    for (const [k, e] of conns) {
+      const silent = now - e.seen;
+      if (!e.conn.open || (e.hb && silent > HB_DEAD_MS)) { conns.delete(k); try { e.conn.close(); } catch (x) {} if (setOnline(e.pid, false)) changed = true; continue; }
+      if (ping) { try { e.conn.send({ t: 'ping' }); } catch (x) {} }
+      if (e.hb && silent > HB_OFFLINE_MS && !e.quiet) { e.quiet = true; if (setOnline(e.pid, false)) changed = true; }
+    }
+    if (changed) publish();
+  }
+  function viewFor(pid) {
+    const v = R.view(G, pid);
+    if (mode === 'host') { v.epoch = G.epoch || 0; v.deputy = deputyPid; }
+    return v;
   }
   function publish() {
-    for (const e of conns.values()) if (e.conn.open) { try { e.conn.send({ t: 'state', v: R.view(G, e.pid) }); } catch (x) {} }
-    setView(R.view(G, myId));
+    if (mode === 'host' && hostLeaving) return;
+    if (mode === 'host') { const d = pickDeputy(); if (d !== deputyPid) { deputyPid = d; scheduleSnap(true); } else scheduleSnap(false); }
+    for (const e of conns.values()) if (e.conn.open) { try { e.conn.send({ t: 'state', v: viewFor(e.pid) }); } catch (x) {} }
+    setView(viewFor(myId));
   }
 
   // ---------- GUEST ----------
-  async function guestJoin(c) {
-    try { await loadPeer(); } catch (e) { toast('Play with Friends needs an internet connection.'); return; }
-    mode = 'guest'; code = c; joinFails = 0; V = null;
-    store.set('last', { mode: 'guest', code });
-    connectGuest(); render();
+  // Each connection attempt gets a number; handlers from older attempts are ignored, so a late timer or close event
+  // from a previous try can never tear down the connection that is working now.
+  let attempt = 0, attemptAt = 0, lastHeard = 0, hostHb = false, join = null;
+  const netLog = [];   // recent connection events; type rrNetLog() in the browser console to see them
+  function nlog(msg) { netLog.push(new Date().toISOString().slice(11, 19) + ' ' + msg); if (netLog.length > 60) netLog.shift(); }
+  window.rrNetLog = () => netLog.slice();
+  function newJoinInfo() { return { tries: 0, notFound: 0, noRoute: 0, step: 'Loading…' }; }
+  let snap = null, lostAt = 0, handover = false, handoverTo = null, prefAddr = null, lastEpoch = 0;
+  async function guestJoin(c, pref) {
+    const last = store.get('last');
+    lastEpoch = last && last.code === c ? last.epoch || 0 : 0;
+    mode = 'guest'; code = c; V = null; join = newJoinInfo(); hostHb = false;
+    snap = null; lostAt = 0; handover = false; handoverTo = null; prefAddr = pref || null;
+    store.set('last', { mode: 'guest', code, epoch: lastEpoch });
+    clearLinkFromUrl();
+    status(''); render();
+    try { await loadPeer(); } catch (e) {
+      if (mode === 'guest' && code === c && !V) { leave('pause'); toast("Couldn't load the online part of the app. Check your internet and try again."); }
+      return;
+    }
+    if (mode !== 'guest' || code !== c) return;
+    connectGuest();
+  }
+  function joinStep(msg) {   // progress text: on the joining screen before the first view, in the status bar after
+    if (!join) return;
+    join.step = msg;
+    if (!V) render(); else status(msg);
+  }
+  // where the host might be: a forwarded address, the current one, the next one (after a hand-over), and the plain code
+  function guestTargets() {
+    const e = V ? V.epoch || 0 : lastEpoch;
+    return [...new Set([prefAddr, roomAddr(e), roomAddr(e + 1), roomAddr(0)].filter(Boolean))];
+  }
+  const deputyName = () => { const d = V && V.deputy && V.players.find(p => p.id === V.deputy); return d ? d.name : ''; };
+  function lostText() {
+    if (!lostAt) return 'Reconnecting…';
+    const d = deputyName();
+    if (handover || Date.now() - lostAt >= GRACE_MS) return d && V.deputy !== myId ? 'The host left — moving the game to ' + d + '…' : 'Host is offline — waiting for them to come back…';
+    return 'Host disconnected — reconnecting…';
+  }
+  function canTakeOver() {   // on a hand-over only the named backup host may take over; otherwise the last one we heard of
+    return mode === 'guest' && !!V && (handover ? handoverTo === myId : V.deputy === myId) && !!snap && snap.code === code &&
+      !!lostAt && navigator.onLine !== false && (handover || Date.now() - lostAt >= GRACE_MS);
+  }
+  function takeOver() {   // we are the backup host and the host is gone: carry on with our copy of the game
+    const g = snap, prev = g.epoch || 0, oldHost = g.hostId;
+    nlog('taking over as host (address ' + (prev + 1) + ')');
+    attempt++; clearTimeout(retryTimer); retryTimer = null;
+    if (peer && !peer.destroyed) peer.destroy();
+    peer = null; hostConn = null; join = null; snap = null; lostAt = 0; handover = false; prefAddr = null;
+    g.epoch = prev + 1; g.hostId = myId;
+    const me = g.players.find(p => p.id === myId); if (me && myName) me.name = myName;
+    const oldName = (g.players.find(p => p.id === oldHost) || {}).name || 'The host';
+    if (g.deal && g.deal.log) { g.deal.log.push(oldName + ' left — ' + (me ? me.name : 'a player') + ' is now hosting.'); while (g.deal.log.length > 8) g.deal.log.shift(); }
+    prevAddr = PREFIX + g.code + (prev ? '-' + prev : ''); probeUntil = Date.now() + 10 * 60000; lastProbe = 0;
+    status('');
+    hostBegin(g);
+    toast(oldName + ' left — you are now the host');
   }
   function connectGuest() {
     if (mode !== 'guest') return;
-    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    clearTimeout(retryTimer); retryTimer = null;
+    if (canTakeOver()) { takeOver(); return; }
+    const my = ++attempt; attemptAt = Date.now();
     if (peer && !peer.destroyed) peer.destroy();
-    status(V ? 'Reconnecting…' : 'Connecting to room ' + code + '…');
-    peer = new Peer(PEER_OPTS);
-    peer.on('open', () => {
-      const conn = peer.connect(PREFIX + code, { reliable: true });
-      hostConn = conn;
-      const to = setTimeout(() => { if (!conn.open) retry(); }, 15000);
-      conn.on('open', () => { clearTimeout(to); joinFails = 0; status(''); conn.send({ t: 'join', pid: myId, name: myName }); });
-      conn.on('data', onGuestMsg);
-      conn.on('close', () => { if (hostConn === conn) retry(); });
-      conn.on('error', () => { if (hostConn === conn) retry(); });
-    });
-    peer.on('error', e => {
-      if (mode !== 'guest') return;
-      if (e.type === 'peer-unavailable') {
-        joinFails++;
-        if (!V && joinFails >= 3) { leave('end'); toast('Room ' + code + ' not found. Check the code, or ask the host to open the app.'); return; }
-        status(V ? 'Host is offline — waiting for them to reopen the app…' : 'Looking for room ' + code + '…');
-      } else status('Connection problem, retrying…');
-      retry();
+    peer = null; hostConn = null;
+    join.tries++;
+    joinStep(V ? lostText() : join.notFound ? 'Looking for room ' + code + '…' : 'Contacting the room server…');
+    const targets = guestTargets();
+    iceServers().then(ice => {
+      if (my !== attempt || mode !== 'guest') return;
+      const p = peer = new Peer(peerOpts(ice));
+      const tries = [], dead = new Set();
+      let conn = null, started = false;
+      nlog('#' + my + ' start → ' + targets.map(a => a.slice(PREFIX.length)).join(' / '));
+      // After 10 s: if no host answered, the room isn't there (the server doesn't always say so).
+      // If one did answer, the phones are still trying to find a network path: give that the full 25 s.
+      const answered = () => tries.some(c => c.peerConnection && c.peerConnection.remoteDescription);
+      let openTimer = setTimeout(function check() {
+        if (my !== attempt || conn) return;
+        if (answered() && Date.now() - attemptAt < JOIN_TIMEOUT_MS) { openTimer = setTimeout(check, JOIN_TIMEOUT_MS - (Date.now() - attemptAt)); return; }
+        const why = answered() ? 'noroute' : started ? 'notfound' : 'server';
+        nlog('#' + my + ' timeout: ' + why);
+        if (why === 'noroute') join.noRoute++; else if (why === 'notfound') join.notFound++;
+        guestRetry(my, why);
+      }, 10000);
+      p.on('open', () => {
+        if (my !== attempt || started) return;   // 'open' repeats after a server reconnect; keep the existing connection
+        started = true;
+        joinStep(V ? lostText() : join.notFound ? 'Looking for room ' + code + '…' : "Connecting to the host's phone…");
+        targets.forEach(addr => {
+          const c = p.connect(addr, { reliable: true });
+          tries.push(c);
+          c.on('open', () => {
+            if (my !== attempt || conn) { try { c.close(); } catch (x) {} return; }
+            conn = hostConn = c; prefAddr = null;
+            tries.forEach(x => { if (x !== c) { try { x.close(); } catch (y) {} } });
+            nlog('#' + my + ' connected to ' + addr.slice(PREFIX.length));
+            clearTimeout(openTimer); join.tries = 0; join.notFound = 0; join.noRoute = 0; lastHeard = Date.now(); lostAt = 0; handover = false;
+            status('');
+            c.send({ t: 'join', pid: myId, name: myName });
+          });
+          c.on('data', m => { if (my === attempt && c === conn) { lastHeard = Date.now(); onGuestMsg(m); } });
+          c.on('close', () => { if (c !== conn) return; nlog('#' + my + ' conn closed' + (my === attempt ? '' : ' (old)')); if (my === attempt) guestRetry(my, 'closed'); });
+          c.on('error', e => {
+            nlog('#' + my + ' conn error ' + (e && e.type) + ' at ' + addr.slice(PREFIX.length));
+            if (my !== attempt || conn) return;
+            dead.add(addr);
+            if (dead.size >= targets.length) { clearTimeout(openTimer); guestRetry(my, 'closed'); }
+          });
+        });
+      });
+      p.on('error', e => {
+        nlog('#' + my + ' peer error ' + e.type + (my === attempt ? '' : ' (old)'));
+        if (my !== attempt || mode !== 'guest') return;
+        if (e.type === 'peer-unavailable') {   // one address has no host; give up only when none has
+          if (conn) return;
+          const msg = String(e.message || '');
+          dead.add(targets.find(a => msg.endsWith(' ' + a)) || targets.find(a => !dead.has(a)));
+          if (dead.size >= targets.length) { clearTimeout(openTimer); join.notFound++; guestRetry(my, 'notfound'); }
+          return;
+        }
+        if (conn && conn.open) return;   // only the link to the PeerJS server dropped; the game connection is fine
+        clearTimeout(openTimer);
+        if (e.type === 'webrtc' || e.type === 'negotiation-failed') join.noRoute++;
+        guestRetry(my, NET_ERRORS.includes(e.type) ? 'server' : 'noroute');
+      });
     });
   }
-  function retry() { if (mode !== 'guest' || retryTimer) return; retryTimer = setTimeout(() => { retryTimer = null; connectGuest(); }, 3000); }
+  function guestRetry(my, why) {
+    if (my !== attempt || mode !== 'guest' || retryTimer) return;
+    nlog('#' + my + ' retry: ' + why);
+    attempt++;   // retire this attempt right away
+    if (peer && !peer.destroyed) peer.destroy();
+    peer = null; hostConn = null;
+    if (V && !lostAt) lostAt = Date.now();
+    if (canTakeOver()) { takeOver(); return; }
+    if (!V && why === 'notfound' && join.notFound >= 5) {
+      const c = code; leave('end'); screen = 'friends'; render();
+      toast('Room ' + c + ' not found. Check the code, and make sure the host has the app open.'); return;
+    }
+    let delay = Math.min(10000, Math.round(1200 * Math.pow(1.5, Math.min(join.tries, 6))));
+    if (lostAt && Date.now() - lostAt < 60000) delay = Math.min(delay, 2000);   // the room may be moving to a new host: look often
+    joinStep(V ? (why === 'noroute' ? 'Connection lost — trying again…' : lostText())
+      : why === 'notfound' ? 'Looking for room ' + code + '…'
+      : why === 'noroute' ? "Can't reach the host's phone yet — trying again…" : 'Connection problem — trying again…');
+    retryTimer = setTimeout(() => { retryTimer = null; connectGuest(); }, delay);
+  }
+  function guestWake() {   // app back in front, or network back
+    if (mode !== 'guest' || !join) return;
+    nlog('wake (' + (hostConn && hostConn.open ? 'connected' : 'not connected') + ')');
+    if (hostConn && hostConn.open) {
+      try { hostConn.send({ t: 'hi' }); } catch (x) {}
+      if (hostHb) lastHeard = Date.now() - (HB_OFFLINE_MS - 5000);   // no reply within ~6 s → reconnect
+    } else if (retryTimer || Date.now() - attemptAt > 8000) connectGuest();
+  }
+  function guestTick() {   // the host pings every few seconds; long silence means the connection is dead
+    if (mode !== 'guest') return;
+    if (canTakeOver()) { takeOver(); return; }
+    if (V && lostAt && !hostConn) status(lostText());
+    if (!hostHb || !hostConn || !hostConn.open) return;   // also while hidden: the backup host must notice a vanished host
+    if (Date.now() - lastHeard > HB_OFFLINE_MS + 1000) guestRetry(attempt, 'silent');
+  }
+  function sendPong() {   // tells the host we're here, and whether the app is on screen (used to choose the backup host)
+    try { hostConn && hostConn.open && hostConn.send({ t: 'pong', vis: document.visibilityState === 'visible' }); } catch (x) {}
+  }
   function onGuestMsg(m) {
     if (!m || typeof m !== 'object') return;
+    if (m.t === 'ping') { hostHb = true; sendPong(); return; }
     if (m.t === 'state') setView(m.v);
+    else if (m.t === 'snap') { if (!snap && m.g) nlog('I am the backup host'); snap = m.g || null; }   // keep the latest copy of the game
+    else if (m.t === 'bye') {   // the host left on purpose and handed the room to the backup host
+      nlog('host left; backup host is ' + (m.deputy === myId ? 'me' : m.deputy));
+      handover = true; handoverTo = m.deputy || null; lostAt = lostAt || Date.now(); prefAddr = roomAddr(m.epoch || 0);
+      if (canTakeOver()) takeOver(); else status(lostText());
+    } else if (m.t === 'moved') { prefAddr = m.addr; nlog('room moved → ' + String(m.addr).slice(PREFIX.length)); }
+    else if (m.t === 'ended') { const c = code; leave('end'); toast('The host ended room ' + c + '.'); }
     else if (m.t === 'err') { toast(m.msg); if (m.fatal) leave('end'); }
   }
 
@@ -209,9 +603,14 @@
     mode = null; V = null; G = null; code = null; sel.clear(); modal = null; screen = 'home';
     if (botTimer) { clearTimeout(botTimer); botTimer = null; }
     if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    clearTimeout(hostRetryTimer); hostRetryTimer = null;
+    clearTimeout(snapTimer); snapTimer = null; clearTimeout(baseTimer); baseTimer = null;
+    attempt++; hostGen++; join = null; hostHb = false;
+    deputyPid = null; snap = null; lostAt = 0; handover = false; handoverTo = null; prefAddr = null; prevAddr = null; probeUntil = 0; hostLeaving = false;
     if (peer && !peer.destroyed) peer.destroy();
-    peer = null; hostConn = null; conns.clear();
-    if (kind === 'pause' && (was === 'host' || was === 'guest')) store.set('last', { mode: was, code: pausedCode, paused: true });
+    if (basePeer && !basePeer.destroyed) basePeer.destroy();
+    peer = null; basePeer = null; hostConn = null; conns.clear();
+    if (kind === 'pause' && (was === 'host' || was === 'guest')) store.set('last', { mode: was, code: pausedCode, paused: true, epoch: lastEpoch });
     else { store.del('last'); if (was === 'host') store.del('hostGame'); if (was === 'solo') store.del('soloGame'); }
     status(''); releaseWake(); render();
   }
@@ -220,6 +619,11 @@
   function setView(v) {
     const prevTurn = V && V.deal ? V.deal.turnPid + ':' + V.deal.turnLeft : '';
     V = v;
+    if (mode === 'guest') {   // remember where the room lives now, and drop the game copy if we're no longer the backup host
+      if (V.deputy !== myId) snap = null;
+      const e = V.epoch || 0;
+      if (e !== lastEpoch) { lastEpoch = e; const l = store.get('last'); if (l && l.code === code) store.set('last', Object.assign(l, { epoch: e })); }
+    }
     deadline = V.deal && V.deal.turnLeft != null && V.phase === 'play' ? performance.now() + V.deal.turnLeft : null;
     if (V.deal && prevTurn.split(':')[0] !== V.deal.turnPid) warned = false;
     const hand = myCards();
@@ -295,7 +699,7 @@
     if (drag && drag.started) { deferRender = true; return; }
     const before = snapshot();
     if (!mode) { if (screen === 'ai') renderAiSetup(); else if (screen === 'friends') renderFriends(); else renderHome(); renderModal(); return; }
-    if (!V) { $app.innerHTML = '<div class="screen center"><p>Connecting to room <b>' + esc(code) + '</b>…</p><button class="ghost" data-a="leave">Cancel</button></div>'; renderModal(); return; }
+    if (!V) { renderJoining(); renderModal(); return; }
     if (V.phase === 'lobby') renderLobby(); else renderGame();
     renderModal();
     if (V.phase !== 'lobby') animate(before);
@@ -335,6 +739,7 @@
     $app.innerHTML =
       '<div class="screen center"><h2>🤖 Play with AI</h2><div class="panel stack">' + nameField() +
       '<div><label>Computer players</label><div class="row">' + [1, 2, 3, 4, 5].map(n => '<button class="seg ' + (n === nBots ? 'on' : '') + '" data-a="nb" data-n="' + n + '">' + n + '</button>').join('') + '</div></div>' +
+      '<div><label>Computer speed</label><div class="row">' + ['quick', 'normal', 'slow'].map(s => '<button class="seg ' + (s === botSpeed ? 'on' : '') + '" data-a="spd" data-v="' + s + '">' + SPEED_LABEL[s] + '</button>').join('') + '</div></div>' +
       matchControl('md') + arrangeControl() +
       '<button class="primary" style="width:100%" data-a="soloNew">Start new game</button>' +
       (saved && saved.phase !== 'lobby' ? '<button style="width:100%" data-a="soloResume">Continue last game (deal ' + saved.dealNo + ')</button>' : '') +
@@ -342,8 +747,6 @@
   }
   function renderFriends() {
     const last = store.get('last');
-    const params = new URLSearchParams(location.search);
-    const linkCode = (params.get('room') || '').toUpperCase();
     let resume = '';
     const hg = store.get('hostGame');
     if (hg && (!last || last.mode !== 'guest')) resume = '<button style="width:100%" data-a="resumeHost">Back to my room ' + esc(hg.code) + (hg.phase === 'play' ? ' (game in progress)' : '') + '</button>';
@@ -355,10 +758,20 @@
       '<div><label>Have a code?</label><div class="row"><input id="code" maxlength="5" placeholder="CODE" value="' + esc(linkCode) + '" style="text-transform:uppercase;letter-spacing:4px;text-align:center"><button data-a="join">Join</button></div></div>' +
       '</div><button class="ghost small" data-a="home">← Back</button></div>';
   }
+  function renderJoining() {
+    const j = join || newJoinInfo();
+    let tip = '';
+    if (j.noRoute) tip = "<b>Your phone can't reach the host's phone.</b> This often happens on mobile data. Try Wi-Fi (or switch Wi-Fi off and use mobile data), then tap Try again.";
+    else if (j.notFound) tip = 'Room not found yet. Check the code with the host, and make sure the host has the app open on their phone.';
+    $app.innerHTML = '<div class="screen center"><div class="sub">Joining room</div><div class="code">' + esc(code) + '</div>' +
+      '<div class="spin" aria-hidden="true"></div><p style="min-height:22px">' + esc(j.step) + '</p>' +
+      (tip ? '<div class="panel hint" style="text-align:center">' + tip + '</div>' : '') +
+      '<div class="row" style="justify-content:center;margin-top:8px">' + (j.tries > 1 ? '<button data-a="retryNow">Try again now</button>' : '') + '<button class="ghost" data-a="cancelJoin">Cancel</button></div></div>';
+  }
   function renderLobby() {
     const isHost = V.hostId === myId;
     const items = V.players.map(p =>
-      '<li><span class="dot ' + (p.online ? 'on' : '') + '"></span><span class="grow">' + esc(p.name) + (p.id === myId ? ' <span class="tag">you</span>' : '') + (p.id === V.hostId ? ' <span class="tag">host</span>' : '') + '</span>' +
+      '<li><span class="dot ' + (p.online ? 'on' : '') + '"></span><span class="grow">' + esc(p.name) + (p.id === myId ? ' <span class="tag">you</span>' : '') + (p.id === V.hostId ? ' <span class="tag">host</span>' : '') + (p.id === V.deputy ? ' <span class="tag" title="Takes over if the host leaves">backup host</span>' : '') + '</span>' +
       (V.dealNo ? '<span class="tag">' + p.total + ' pts</span>' : '') +
       (isHost && p.id !== myId ? ' <button class="small ghost" data-a="remove" data-p="' + esc(p.id) + '">✕</button>' : '') + '</li>').join('');
     $app.innerHTML =
@@ -498,6 +911,7 @@
         (V.solo ? '' : '<button style="width:100%" data-a="share">Invite friends (code ' + esc(V.code) + ')</button>') +
         '<button style="width:100%" data-a="rules">How to play</button>' +
         '<button style="width:100%" class="ghost" data-a="arrToggle">New deals: ' + (arrangePref === 'sorted' ? 'sort my cards by suit' : 'leave as dealt (I arrange)') + '</button>' +
+        (V.solo ? '<button style="width:100%" class="ghost" data-a="spdToggle">Computer speed: ' + SPEED_LABEL[botSpeed] + '</button>' : '') +
         (isHost && !V.solo && V.phase === 'play' ? '<button style="width:100%" class="ghost" data-a="toLobby">End deal & go to lobby</button>' : '') +
         '<button style="width:100%" class="danger" data-a="leave">' + (V.solo ? 'Quit game' : 'Leave (you can rejoin)') + '</button>' +
         (isHost && !V.solo ? '<button style="width:100%" class="ghost" data-a="endRoom">End room for everyone</button>' : '') +
@@ -701,7 +1115,7 @@
     myName = n; store.set('name', n); return true;
   }
   async function share() {
-    const url = location.origin + location.pathname + '?room=' + V.code;
+    const url = location.origin + location.pathname + '#' + V.code;
     const text = 'Join my Rummy room! Code: ' + V.code;
     try { if (navigator.share) await navigator.share({ title: 'Rummy Room', text, url }); else { await navigator.clipboard.writeText(text + ' ' + url); toast('Invite link copied'); } } catch (e) {}
   }
@@ -738,13 +1152,26 @@
       }
       case 'rejoin': if (readName()) guestJoin(store.get('last').code); break;
       case 'leave':
-        if (mode === 'host' && !confirm('Leave the room? The game pauses until you come back (Play with Friends → join with code ' + code + ').')) break;
+        if (mode === 'host') {
+          const d = deputyPid && G.players.find(p => p.id === deputyPid);
+          if (!confirm(d ? 'Leave the room? ' + d.name + ' takes over as host and the game goes on. You can rejoin with code ' + code + '.'
+            : 'Leave the room? The game pauses until you come back (Play with Friends → join with code ' + code + ').')) break;
+          modal = null; clearLinkFromUrl();
+          if (d) hostLeave('handover'); else leave('pause');
+          break;
+        }
         if (mode === 'solo' && V && V.phase === 'play' && !confirm('Quit this game?')) break;
-        modal = null; leave(mode === 'solo' ? 'end' : 'pause'); history.replaceState(null, '', location.pathname); break;
+        modal = null; leave(mode === 'solo' ? 'end' : 'pause'); clearLinkFromUrl(); break;
       case 'endRoom':
         if (!confirm('End this room for everyone? Scores will be cleared.')) break;
-        modal = null; leave('end'); history.replaceState(null, '', location.pathname); break;
+        modal = null; clearLinkFromUrl();
+        if (mode === 'host') hostLeave('end'); else leave('end');
+        break;
       case 'share': share(); break;
+      case 'retryNow': if (mode === 'guest' && join) { join.tries = 0; connectGuest(); } break;
+      case 'cancelJoin': leave('pause'); screen = 'friends'; render(); break;
+      case 'spd': keepName(); botSpeed = el.dataset.v; store.set('botspeed', botSpeed); render(); break;
+      case 'spdToggle': { const order = ['quick', 'normal', 'slow']; botSpeed = order[(order.indexOf(botSpeed) + 1) % 3]; store.set('botspeed', botSpeed); lastModal = ''; renderModal(); break; }
       case 'start': doAct({ type: 'start' }); break;
       case 'next': doAct({ type: 'next' }); break;
       case 'toLobby': modal = null; doAct({ type: 'lobby' }); break;
@@ -784,12 +1211,29 @@
     if (e.key === 'Escape' && modal) { modal = null; renderModal(); }
   });
   document.addEventListener('visibilitychange', () => {
+    if (mode === 'guest') sendPong();   // the host moves the backup host role away from a phone that leaves the app
     if (document.visibilityState !== 'visible') return;
-    if (mode === 'guest' && (!hostConn || !hostConn.open)) connectGuest();
-    if (mode === 'host') { if (!peer || peer.destroyed) openHostPeer(); else if (peer.disconnected) peer.reconnect(); }
+    guestWake();
+    if (mode === 'host') {
+      const now = Date.now();
+      for (const e of conns.values()) e.seen = Math.max(e.seen, now - (HB_OFFLINE_MS - 5000));
+      lastPing = 0;
+      if (!peer || peer.destroyed) openHostPeer(); else if (peer.disconnected) hostServerRetry(peer, 0);
+    }
     if (V && V.phase === 'play') requestWake();
   });
-  window.addEventListener('online', () => { if (mode === 'guest' && (!hostConn || !hostConn.open)) connectGuest(); });
+  window.addEventListener('online', () => { guestWake(); if (mode === 'host' && peer && !peer.destroyed && peer.disconnected) hostServerRetry(peer, 0); });
+  let lastTick = Date.now();
+  setInterval(() => {
+    const now = Date.now();
+    if (now - lastTick > 6000) {   // this phone was asleep: give the others a few seconds to answer before judging them
+      lastHeard = Math.max(lastHeard, now - (HB_OFFLINE_MS - 5000));
+      for (const e of conns.values()) e.seen = Math.max(e.seen, now - (HB_OFFLINE_MS - 5000));
+      lastPing = 0;
+    }
+    lastTick = now;
+    guestTick(); hostTick(); hostProbeTick();
+  }, 2000);
   let rz; window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if (!drag) render(); }, 120); });
 
   // ---------- turn countdown ----------
@@ -804,7 +1248,7 @@
   // ---------- boot ----------
   (function boot() {
     const last = store.get('last');
-    const linkCode = (new URLSearchParams(location.search).get('room') || '').toUpperCase();
+    window.addEventListener('hashchange', () => { const c = linkRoomCode(); if (c && !mode) { linkCode = c; screen = 'friends'; render(); } });
     if (linkCode) { screen = 'friends'; if (last && last.mode === 'guest' && last.code === linkCode && myName && !last.paused) { guestJoin(linkCode); return; } render(); return; }
     if (last && myName && !last.paused) {
       if (last.mode === 'solo' && store.get('soloGame')) { const g = store.get('soloGame'); seenDeal = g.deal ? g.deal.id : 0; seenSeq = g.seq; arrangedDeal = g.deal ? g.deal.id : -1; soloStart(g); return; }
