@@ -11,6 +11,7 @@
   const FULL_COUNT = 80, FIRST_DROP = 20, MIDDLE_DROP = 40, MIN_LOSS = 1;
   const NO_WILD = -1;
   let TURN_MS = 45000;   // turn timer for Play with Friends
+  let SHOW_MS = 45000;   // after a valid show, the others get this long to group their cards (no limit vs computer)
 
   // Card id: "<rank>-<suit>-<copy>", printed joker "0-J-<copy>"
   function parse(id) { const p = id.split('-'); return { id, r: +p[0], s: p[1], d: +p[2] }; }
@@ -96,10 +97,8 @@
     const seqs = info.filter(x => isSeqType(x.type)).length;
     const sum = list => list.reduce((a, g) => a + g.ids.reduce((b, id) => b + cardPoints(parse(id), wr), 0), 0);
     const valid = pure >= 1 && seqs >= 2 && info.every(x => x.type !== 'invalid');
-    let pts;
-    if (pure === 0) pts = sum(info);
-    else if (seqs < 2) pts = sum(info.filter(x => !isPureType(x.type)));
-    else pts = sum(info.filter(x => x.type === 'invalid'));
+    // without both "lives" (a pure sequence plus a second sequence, pure or not) a loser pays the full count
+    const pts = pure === 0 || seqs < 2 ? FULL_COUNT : sum(info.filter(x => x.type === 'invalid'));
     return { valid, info, pure, seqs, pts: valid ? 0 : Math.min(FULL_COUNT, pts) };
   }
 
@@ -167,11 +166,9 @@
       const pure = groups.filter(x => isPureType(x.type)).length;
       const seqs = groups.filter(x => isSeqType(x.type)).length;
       const pts = id => cardPoints(parse(id), wr);
-      const deadPts = dead.reduce((a, id) => a + pts(id), 0);
-      const all = ids.reduce((a, id) => a + pts(id), 0);
-      const pureCardPts = groups.filter(x => isPureType(x.type)).reduce((a, g) => a + g.ids.reduce((b, id) => b + pts(id), 0), 0);
+      const deadPts = dead.reduce((a, id) => a + pts(id), 0) + extra.reduce((a, id) => a + pts(id), 0);
       const valid = pure >= 1 && seqs >= 2 && !dead.length && !extra.length;
-      let cost = pure === 0 ? all : seqs < 2 ? all - pureCardPts : deadPts;
+      let cost = pure === 0 || seqs < 2 ? FULL_COUNT : deadPts;   // same rule as evaluate(): no two sequences = full count
       cost = valid ? 0 : Math.min(FULL_COUNT, cost);
       let score;
       if (mode === 'ai') {
@@ -327,7 +324,7 @@
       if (D.out[pid]) { pts = D.out[pid]; note = pts === FIRST_DROP ? 'First drop' : 'Middle drop'; }
       else if (wrongBy) { pts = pid === wrongBy ? FULL_COUNT : 0; note = pid === wrongBy ? 'Wrong show' : ''; }
       else if (pid === winner) { pts = 0; note = 'Winner'; }
-      else { pts = Math.max(MIN_LOSS, ev.pts); note = ''; }
+      else { pts = Math.max(MIN_LOSS, ev.pts); note = ev.pure < 1 || ev.seqs < 2 ? 'Full count · no 2 sequences' : ''; }
       return { pid, name: nameOf(G, pid), pts, note, groups: ev.info };
     });
     const mult = D.mult || 1;
@@ -338,6 +335,32 @@
     D.result = { winner, wrongBy: wrongBy || null, rows, mult, final, standings };
     G.history.push({ deal: G.dealNo, mult, pts: Object.fromEntries(rows.map(r => [r.pid, r.pts])) });
     G.phase = 'result';
+  }
+  // A valid show doesn't end the deal at once: like at a real table, everyone else first groups their cards
+  // (scores are counted from their final groups). Computer players group instantly.
+  function startShow(G, winner) {
+    const D = G.deal;
+    G.phase = 'show';
+    D.show = { winner, done: { [winner]: true } };
+    D.order.forEach(pid => {
+      if (D.out[pid]) { D.show.done[pid] = true; return; }
+      const p = G.players.find(x => x.id === pid);
+      if (!p || !p.bot || pid === winner) return;
+      const ids = flat(D.hands[pid]);
+      D.hands[pid] = bestArrangement(ids, wrFor(D, pid), 'score', 6000).groups; checkReveal(G, pid);
+      if (D.revealed[pid]) D.hands[pid] = bestArrangement(ids, D.wildRank, 'score', 6000).groups;
+      D.show.done[pid] = true;
+    });
+    D.turnEnds = G.solo ? 0 : Date.now() + SHOW_MS;
+    maybeEndShow(G, false);
+  }
+  function maybeEndShow(G, force) {   // ends when everyone still connected is done, or time is up
+    const D = G.deal, S = D.show;
+    const waiting = D.order.filter(pid => !S.done[pid] && (G.players.find(p => p.id === pid) || {}).online !== false);
+    if (!force && waiting.length) return false;
+    log(D, nameOf(G, S.winner) + ' won the deal!');
+    endDeal(G, S.winner, null);
+    return true;
   }
   function checkLastStanding(G) {
     const act = activeIds(G.deal);
@@ -350,7 +373,7 @@
     const isHost = pid === G.hostId;
     if (a.type === 'start' || a.type === 'next') {
       if (!isHost) return 'Only the host can start';
-      if (G.phase === 'play') return 'Deal in progress';
+      if (G.phase === 'play' || G.phase === 'show') return 'Deal in progress';
       return startDeal(G, rand);
     }
     if (a.type === 'lobby') { if (!isHost) return 'Host only'; G.phase = 'lobby'; G.deal = null; return null; }
@@ -361,18 +384,33 @@
     }
     if (a.type === 'newMatch') {
       if (!isHost) return 'Host only';
-      if (G.phase === 'play') return 'Deal in progress';
+      if (G.phase === 'play' || G.phase === 'show') return 'Deal in progress';
       G.players.forEach(p => { p.total = 0; }); G.history = []; G.dealNo = 0; G.matchOver = false;
       return startDeal(G, rand);
     }
     if (a.type === 'reset') { if (!isHost) return 'Host only'; G.players.forEach(p => { p.total = 0; }); G.history = []; G.dealNo = 0; G.matchOver = false; G.phase = 'lobby'; G.deal = null; return null; }
     if (a.type === 'remove') {
-      if (!isHost || G.phase === 'play') return 'Can only remove players between deals';
+      if (!isHost || G.phase === 'play' || G.phase === 'show') return 'Can only remove players between deals';
       if (a.target === G.hostId) return 'Host cannot be removed';
       G.players = G.players.filter(p => p.id !== a.target); return null;
     }
     const D = G.deal;
-    if (G.phase !== 'play' || !D) return 'No deal in progress';
+    if ((G.phase !== 'play' && G.phase !== 'show') || !D) return 'No deal in progress';
+    if (G.phase === 'show') {   // someone declared: the others may only group their cards and say they're done
+      if (a.type === 'timeout') {
+        if (!isHost) return 'Host only';
+        if (!a.force && (!D.turnEnds || Date.now() < D.turnEnds - 1000)) return 'Time is not up yet';
+        maybeEndShow(G, true); return null;
+      }
+      if (!D.hands[pid]) return 'You will join from the next deal';
+      if (a.type === 'groups') {
+        const g = cleanGroups(a.groups || []);
+        if (!sameCards(flat(g), flat(D.hands[pid]))) return 'Hand changed — try again';
+        D.hands[pid] = g; checkReveal(G, pid); return null;
+      }
+      if (a.type === 'showDone') { D.show.done[pid] = true; maybeEndShow(G, false); return null; }
+      return 'Someone declared — group your cards, then tap Done';
+    }
     if (!D.hands[pid]) return 'You will join from the next deal';
     const hand = D.hands[pid];
 
@@ -466,7 +504,7 @@
       setAct(G, pid, a.type, { card: c });
       if (a.type === 'discard') { log(D, nameOf(G, pid) + ' discarded ' + label(c) + '.'); nextTurn(G); return null; }
       const ev = evaluate(rest, wrFor(D, pid));
-      if (ev.valid) { log(D, nameOf(G, pid) + ' declared and won the deal!'); endDeal(G, pid, null); }
+      if (ev.valid) { log(D, nameOf(G, pid) + ' declared! Everyone else: group your cards.'); startShow(G, pid); }
       else { log(D, nameOf(G, pid) + ' made a wrong show (80 pts).'); endDeal(G, null, pid); }
       return null;
     }
@@ -550,12 +588,16 @@
         turnPid: D.order[D.turn], step: D.step, turnLeft: D.turnEnds ? Math.max(0, D.turnEnds - Date.now()) : null, turnMs: TURN_MS,
         timeouts: D.timeouts || {}, log: D.log.slice(-4), result: D.result, lastAct: la,
         myGroups: D.hands[pid] || null, picked: D.order[D.turn] === pid ? D.picked : null,
-        lastDrawn: D.lastDrawn[pid] || null };
+        lastDrawn: D.lastDrawn[pid] || null, showMs: SHOW_MS };
+      if (G.phase === 'show' && D.show) {   // everyone sees the winning hand while they group their own cards
+        const w = D.show.winner;
+        v.deal.show = { winner: w, done: Object.keys(D.show.done), winnerGroups: evaluate(D.hands[w], wrFor(D, w)).info, winnerWild: D.revealed[w] ? D.wildRank : null };
+      }
     }
     return v;
   }
 
-  const api = { get TURN_MS() { return TURN_MS; }, setTurnMs(ms) { TURN_MS = ms; }, multiplier, parse, makeDeck, shuffle, secureInt, isJoker, cardPoints, classify, evaluate, sortGroup, groupBySuit, flat, label,
+  const api = { get TURN_MS() { return TURN_MS; }, setTurnMs(ms) { TURN_MS = ms; }, get SHOW_MS() { return SHOW_MS; }, setShowMs(ms) { SHOW_MS = ms; }, multiplier, parse, makeDeck, shuffle, secureInt, isJoker, cardPoints, classify, evaluate, sortGroup, groupBySuit, flat, label,
     bestArrangement, newGame, newSoloGame, addPlayer, startDeal, act, botStep, view, isPureType,
     RANK_LABEL, SUIT_SYM, MAX_PLAYERS, NO_WILD };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.Rules = api;

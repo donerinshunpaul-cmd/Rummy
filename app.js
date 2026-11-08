@@ -39,7 +39,8 @@
   const genCode = () => Array.from({ length: 5 }, () => 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'[R.secureInt(31)]).join('');
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const FAST = /[?&]fast=1/.test(location.search); // test switch only
-  if (FAST) R.setTurnMs(6000);
+  if (FAST) { R.setTurnMs(6000); R.setShowMs(8000); }
+  const inDealPhase = ph => ph === 'play' || ph === 'show';   // 'show': someone declared, the others group their cards
   const wait = (a, b) => (a + Math.random() * (b - a)) / (FAST ? 8 : 1);
 
   let myId = store.get('pid'); if (!myId) { myId = rid(12); store.set('pid', myId); }
@@ -55,7 +56,6 @@
   let modal = null, lastModal = '';
   let nBots = store.get('nbots', 2);
   let matchDeals = store.get('deals', 0);           // 0 = unlimited, else fixed (min 3)
-  let arrangePref = store.get('arrange', 'sorted');  // 'sorted' | 'dealt'
   let botSpeed = store.get('botspeed', 'normal');     // 'quick' | 'normal' | 'slow'
   // computer pauses in ms: draw = before picking, think = before throwing, long = [chance, extra ms] of a longer think
   const BOT_PACE = {
@@ -123,7 +123,7 @@
   let toTimer = null;
   function scheduleTimeout() {
     clearTimeout(toTimer); toTimer = null;
-    if (mode !== 'host' || !G || G.phase !== 'play' || !G.deal || !G.deal.turnEnds) return;
+    if (mode !== 'host' || !G || !inDealPhase(G.phase) || !G.deal || !G.deal.turnEnds) return;
     toTimer = setTimeout(() => {
       toTimer = null;
       if (mode !== 'host') return;
@@ -182,7 +182,7 @@
   function hostBegin(g) {
     mode = 'host'; G = g; code = G.code;
     G.players.forEach(p => { p.online = p.id === myId; });
-    if (G.deal && G.phase === 'play' && G.deal.turnEnds) G.deal.turnEnds = Date.now() + R.TURN_MS; // fresh time after a pause
+    if (G.deal && inDealPhase(G.phase) && G.deal.turnEnds) G.deal.turnEnds = Date.now() + (G.phase === 'show' ? R.SHOW_MS : R.TURN_MS); // fresh time after a pause
     store.set('last', { mode: 'host', code });
     openHostPeer(); commit();
   }
@@ -614,7 +614,7 @@
     else { store.del('last'); if (was === 'host') store.del('hostGame'); if (was === 'solo') store.del('soloGame'); }
     status(''); releaseWake(); render();
   }
-  let deadline = null, warned = false;
+  let deadline = null, warned = false, prevShow = false;
   const secsLeft = () => (deadline ? Math.ceil(Math.max(0, deadline - performance.now()) / 1000) : 0);
   function setView(v) {
     const prevTurn = V && V.deal ? V.deal.turnPid + ':' + V.deal.turnLeft : '';
@@ -624,21 +624,21 @@
       const e = V.epoch || 0;
       if (e !== lastEpoch) { lastEpoch = e; const l = store.get('last'); if (l && l.code === code) store.set('last', Object.assign(l, { epoch: e })); }
     }
-    deadline = V.deal && V.deal.turnLeft != null && V.phase === 'play' ? performance.now() + V.deal.turnLeft : null;
-    if (V.deal && prevTurn.split(':')[0] !== V.deal.turnPid) warned = false;
+    deadline = V.deal && V.deal.turnLeft != null && inDealPhase(V.phase) ? performance.now() + V.deal.turnLeft : null;
+    if (V.deal && (prevTurn.split(':')[0] !== V.deal.turnPid || (V.phase === 'show') !== prevShow)) warned = false;
+    prevShow = V.phase === 'show';
     const hand = myCards();
     sel.forEach(id => { if (!hand.includes(id)) sel.delete(id); });
     const mine = isMyTurn();
     if (mine && !lastTurnMine && navigator.vibrate) navigator.vibrate(40);
     lastTurnMine = mine;
-    if (V.phase === 'play') requestWake();
+    if (inDealPhase(V.phase)) requestWake();
     render();
     maybeArrangeDealt();
   }
-  function maybeArrangeDealt() {
+  function maybeArrangeDealt() {   // new hands arrive as dealt; a moment later they're sorted by suit
     if (!V || V.phase !== 'play' || !V.deal || !V.deal.myGroups || arrangedDeal === V.deal.id) return;
     arrangedDeal = V.deal.id;
-    if (arrangePref !== 'sorted') return;
     const dealId = V.deal.id;
     setTimeout(() => {
       if (!V || !V.deal || V.deal.id !== dealId || !V.deal || !V.deal.myGroups || V.deal.myGroups.length !== 1 || (drag && drag.started)) return;
@@ -651,6 +651,9 @@
   const canDraw = () => isMyTurn() && V.deal.step === 'draw';
   const canThrow = () => isMyTurn() && V.deal.step === 'discard';
   const wrKnown = () => (V && V.deal && V.deal.wildRank != null ? V.deal.wildRank : R.NO_WILD);
+  // after someone declares: do I still need to group my cards and tap Done?
+  const timerMs = () => (V && V.phase === 'show' ? V.deal.showMs || R.SHOW_MS : V.deal.turnMs);
+  const mustGroup = () =>!!(V && V.phase === 'show' && V.deal && V.deal.show && V.deal.myGroups && !V.deal.show.done.includes(myId));
   const playerName = pid => ((V.players.find(p => p.id === pid)) || {}).name || '?';
   async function requestWake() { try { if (!wakeLock && navigator.wakeLock && document.visibilityState === 'visible') { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); } } catch (e) {} }
   function releaseWake() { try { wakeLock && wakeLock.release(); } catch (e) {} wakeLock = null; }
@@ -714,11 +717,6 @@
         '<b style="min-width:110px;text-align:center">' + n + ' deals</b><button class="small ghost" data-a="' + act + '" data-n="' + Math.min(30, n + 1) + '">＋</button></div>' +
         '<div class="hint" style="text-align:center;margin-top:6px">1st and last deal score double points</div>' : '') + '</div>';
   }
-  function arrangeControl() {
-    return '<div><label>My cards when dealt</label><div class="row">' +
-      '<button class="seg ' + (arrangePref === 'sorted' ? 'on' : '') + '" data-a="arr" data-v="sorted">Sort by suit</button>' +
-      '<button class="seg ' + (arrangePref === 'dealt' ? 'on' : '') + '" data-a="arr" data-v="dealt">As dealt · I arrange</button></div></div>';
-  }
   function keepName() { const ne = document.getElementById('name'); if (ne) { myName = ne.value.trim().slice(0, 16); store.set('name', myName); } }
   function nameField() { return '<label>Your name</label><input id="name" maxlength="16" placeholder="Your name" value="' + esc(myName) + '" autocomplete="nickname">'; }
   function renderHome() {
@@ -740,7 +738,7 @@
       '<div class="screen center"><h2>🤖 Play with AI</h2><div class="panel stack">' + nameField() +
       '<div><label>Computer players</label><div class="row">' + [1, 2, 3, 4, 5].map(n => '<button class="seg ' + (n === nBots ? 'on' : '') + '" data-a="nb" data-n="' + n + '">' + n + '</button>').join('') + '</div></div>' +
       '<div><label>Computer speed</label><div class="row">' + ['quick', 'normal', 'slow'].map(s => '<button class="seg ' + (s === botSpeed ? 'on' : '') + '" data-a="spd" data-v="' + s + '">' + SPEED_LABEL[s] + '</button>').join('') + '</div></div>' +
-      matchControl('md') + arrangeControl() +
+      matchControl('md') +
       '<button class="primary" style="width:100%" data-a="soloNew">Start new game</button>' +
       (saved && saved.phase !== 'lobby' ? '<button style="width:100%" data-a="soloResume">Continue last game (deal ' + saved.dealNo + ')</button>' : '') +
       '</div><button class="ghost small" data-a="home">← Back</button></div>';
@@ -753,7 +751,6 @@
     else if (last && last.mode === 'guest') resume = '<button style="width:100%" data-a="rejoin">Rejoin room ' + esc(last.code) + '</button>';
     $app.innerHTML =
       '<div class="screen center"><h2>👥 Play with Friends</h2><div class="panel stack">' + nameField() + resume +
-      arrangeControl() +
       '<button class="primary" style="width:100%" data-a="create">Create a room</button>' +
       '<div><label>Have a code?</label><div class="row"><input id="code" maxlength="5" placeholder="CODE" value="' + esc(linkCode) + '" style="text-transform:uppercase;letter-spacing:4px;text-align:center"><button data-a="join">Join</button></div></div>' +
       '</div><button class="ghost small" data-a="home">← Back</button></div>';
@@ -799,7 +796,10 @@
     const opps = others.map(p => {
       const turn = D.turnPid === p.id && V.phase === 'play';
       let st;
-      if (!p.inDeal) st = 'Next deal'; else if (p.out) st = 'Dropped'; else if (!p.online) st = 'Offline';
+      const S = V.phase === 'show' && D.show;
+      if (!p.inDeal) st = 'Next deal'; else if (p.out) st = 'Dropped';
+      else if (S) st = p.id === S.winner ? '<b style="color:var(--ok)">Declared ✓</b>' : S.done.includes(p.id) ? '<span style="color:var(--ok)">Done ✓</span>' : p.online ? 'Grouping…' : 'Offline';
+      else if (!p.online) st = 'Offline';
       else if (turn && p.bot) st = '<span class="think"><i></i><i></i><i></i></span>';
       else st = '<span class="mini"></span>' + p.count;
       if (turn && deadline) st += ' <span class="tmr" data-timer>' + secsLeft() + 's</span>';
@@ -811,8 +811,10 @@
     const jslot = D.wild
       ? '<div class="pile jslot" id="jslot"><div class="stackwrap">' + cardHTML(D.wild, { noWild: true }) + '</div>Joker: all ' + R.RANK_LABEL[D.wildRank] + 's</div>'
       : '<div class="pile jslot" id="jslot"><div class="stackwrap"><div class="card closed"><span class="cnt">🔒</span></div></div>Closed joker</div>';
-    const table =
-      '<div class="table">' + jslot +
+    const S = V.phase === 'show' && D.show;
+    const table = S
+      ? '<div class="showbox"><div class="sub">' + (S.winner === myId ? 'Your winning hand' : esc(playerName(S.winner)) + "'s winning hand") + '</div>' + groupsHTML(S.winnerGroups) + '</div>'
+      : '<div class="table">' + jslot +
       '<div class="pile ' + (canDraw() ? 'can' : '') + '" data-pile="stock" data-a="drawStock"><div class="stackwrap" id="stock">' + backHTML('') + backHTML('<span class="cnt">' + Math.max(0, D.stockCount - 1) + '</span>') + '</div>Deck</div>' +
       '<div class="pile ' + (canDraw() && top && R.parse(top).s !== 'J' ? 'can' : '') + '" data-pile="discard" data-a="drawDiscard"><div class="stackwrap" id="openpile">' +
         (under ? cardHTML(under, { cls: 'under' }) : '') + (top ? cardHTML(top, { key: 'c:' + top }) : '<div class="empty"></div>') + '</div>Open card</div>' +
@@ -821,6 +823,9 @@
 
     let banner;
     if (V.phase === 'result') banner = 'Deal over';
+    else if (S) banner = S.winner === myId ? 'You declared! Others are grouping their cards…'
+      : mustGroup() ? '<b>' + esc(playerName(S.winner)) + ' declared!</b> Group your cards, then tap Done'
+      : esc(playerName(S.winner)) + ' declared — waiting for the others…';
     else if (!inDeal) banner = 'You will be dealt in next deal';
     else if (me.out) banner = 'You dropped this deal (' + me.out + ' pts)';
     else if (mine) banner = D.step === 'draw' ? 'Your turn — pick from the Deck or the Open card' : 'Throw a card onto the Open pile, or Finish to declare';
@@ -844,6 +849,7 @@
       if (canDraw()) btns += '<button class="danger small" data-a="drop">Drop</button>';
       if (sel.size >= 2) btns += '<button class="small" data-a="group">Group (' + sel.size + ')</button>';
       btns += '<button class="small ghost" data-a="sort">Sort</button><button class="small ghost" data-a="auto">Auto-arrange</button>';
+      if (mustGroup()) btns += '<button class="go small" data-a="showDone">Done</button>';
       if (canThrow()) {
         btns += '<button class="primary small" data-a="discard" ' + (one ? '' : 'disabled') + '>Discard</button>';
         btns += '<button class="go small" data-a="declareSel" ' + (one ? '' : 'disabled') + '>Declare</button>';
@@ -855,8 +861,8 @@
       '<div class="topbar"><span>' + (V.solo ? 'vs Computer' : 'Room <b>' + esc(V.code) + '</b>') + ' · Deal ' + V.dealNo + (V.matchDeals ? ' of ' + V.matchDeals : '') + (V.mult > 1 ? ' <span class="tag" style="background:var(--gold);color:#2a2100">×2 points</span>' : '') + '</span><span class="grow"></span>' +
       '<button class="small ghost" data-a="scores">Scores</button><button class="small ghost" data-a="menu">☰</button></div>' +
       '<div class="top"><div class="opps">' + opps + '</div>' + table + '</div>' +
-      '<div class="banner ' + (mine ? 'mine' : '') + '">' + banner + (deadline && mine ? ' <span class="tmr" data-timer>' + secsLeft() + 's</span>' : '') + '</div>' +
-      (deadline ? '<div class="tbar"><i data-timerbar style="width:' + (deadline ? 100 * Math.max(0, deadline - performance.now()) / V.deal.turnMs : 0) + '%"></i></div>' : '') +
+      '<div class="banner ' + (mine || mustGroup() ? 'mine' : '') + '">' + banner + (deadline && (mine || S) ? ' <span class="tmr" data-timer>' + secsLeft() + 's</span>' : '') + '</div>' +
+      (deadline ? '<div class="tbar"><i data-timerbar style="width:' + (deadline ? 100 * Math.max(0, deadline - performance.now()) / timerMs() : 0) + '%"></i></div>' : '') +
       '<div class="log">' + esc(D.log[D.log.length - 1] || '') + '</div>' +
       '<div class="hand" id="hand">' + hand + '</div>' +
       '<div class="actions">' + ptsLine + btns + '</div></div>';
@@ -910,9 +916,8 @@
       html = '<div class="modal-bg" data-a="close"><div class="modal stack" style="max-width:340px">' +
         (V.solo ? '' : '<button style="width:100%" data-a="share">Invite friends (code ' + esc(V.code) + ')</button>') +
         '<button style="width:100%" data-a="rules">How to play</button>' +
-        '<button style="width:100%" class="ghost" data-a="arrToggle">New deals: ' + (arrangePref === 'sorted' ? 'sort my cards by suit' : 'leave as dealt (I arrange)') + '</button>' +
         (V.solo ? '<button style="width:100%" class="ghost" data-a="spdToggle">Computer speed: ' + SPEED_LABEL[botSpeed] + '</button>' : '') +
-        (isHost && !V.solo && V.phase === 'play' ? '<button style="width:100%" class="ghost" data-a="toLobby">End deal & go to lobby</button>' : '') +
+        (isHost && !V.solo && inDealPhase(V.phase) ? '<button style="width:100%" class="ghost" data-a="toLobby">End deal & go to lobby</button>' : '') +
         '<button style="width:100%" class="danger" data-a="leave">' + (V.solo ? 'Quit game' : 'Leave (you can rejoin)') + '</button>' +
         (isHost && !V.solo ? '<button style="width:100%" class="ghost" data-a="endRoom">End room for everyone</button>' : '') +
         '<button style="width:100%" class="ghost" data-a="close">Back</button></div></div>';
@@ -924,9 +929,10 @@
         '<p><b>Arranging:</b> drag cards between groups, onto <b>＋ New group</b>, or select several and press Group. <b>Auto-arrange</b> finds a good grouping.</p>' +
         '<p><b>Pure sequence:</b> 3+ in a row, same suit, no joker (4♥ 5♥ 6♥). <b>Trio:</b> 3 identical cards (7♥ 7♥ 7♥) count as a pure sequence; only one trio counts. <b>Sequence:</b> jokers may fill gaps. <b>Set:</b> 3–4 of the same rank, different suits.</p>' +
         '<p><b>To win:</b> group all 13 cards with at least 2 sequences, one of them pure. After picking your 14th card, drag a card to <b>Finish</b> (or select it and press Declare).</p>' +
-        '<p><b>Points:</b> A K Q J = 10, number cards = face value, jokers = 0. Losers score their ungrouped cards (min 1, max 80). With no pure sequence, every card counts. Wrong show = 80. Drop before your first pick = 20, later = 40. Lowest total wins.</p>' +
+        '<p><b>Someone declared?</b> You get 45 seconds (no limit against the computer) to group your cards, then tap <b>Done</b>. Your points are counted from your final groups.</p>' +
+        '<p><b>Points:</b> A K Q J = 10, number cards = face value, jokers = 0. Losers with 2 sequences (one pure) score their ungrouped cards (min 1, max 80). Without 2 sequences, a loser scores the full <b>80</b>. Wrong show = 80. Drop before your first pick = 20, later = 40. Lowest total wins.</p>' +
         '<p><b>Match:</b> play unlimited deals, or a fixed number (3 or more). In a fixed match the <b>1st and last deal score double</b>. Lowest total after the last deal wins the match.</p>' +
-        '<p><b>Your cards:</b> choose to get them sorted by suit, or exactly as dealt and arrange them yourself. Drag cards to any position, inside a group or between groups.</p>' +
+        '<p><b>Your cards</b> arrive sorted by suit. Drag cards to any position, inside a group or between groups.</p>' +
         '<p><b>Turn timer (Play with Friends):</b> 45 seconds per turn. If time runs out, the turn passes: a card you picked goes back to the open pile; if you had not picked, the top deck card is turned onto the open pile.</p>' +
         '<p><b>Deck finished?</b> The open pile is turned over (no shuffle) and play continues.</p>' +
         '<div class="row" style="justify-content:flex-end"><button data-a="close">Got it</button></div></div></div>';
@@ -1001,6 +1007,7 @@
       toast('Joker unlocked: every ' + R.RANK_LABEL[D.wildRank] + ' is now a joker for you!');
     }
     if (newAct && la.type === 'timeout' && la.pid === myId) toast("Time's up — your turn was passed");
+    if (newAct && la.type === 'declare' && mustGroup()) { toast(playerName(la.pid) + ' declared! Group your cards, then tap Done.'); if (navigator.vibrate) navigator.vibrate([80, 60, 80]); }
     if (newDeal && V.mult > 1) toast('Deal ' + V.dealNo + ': double points!');
     seenRevealed = !!D.revealed; seenDeal = D.id; if (la) seenSeq = Math.max(seenSeq, la.seq);
   }
@@ -1083,7 +1090,7 @@
   }
   $app.addEventListener('pointerdown', e => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
-    if (!V || V.phase !== 'play') return;
+    if (!V || !inDealPhase(V.phase)) return;
     const cardEl = e.target.closest('#hand [data-card]');
     const pileEl = e.target.closest('[data-pile]');
     if (cardEl) drag = { kind: 'hand', id: cardEl.dataset.card, el: cardEl, x0: e.clientX, y0: e.clientY, pid: e.pointerId, started: false };
@@ -1135,8 +1142,6 @@
       case 'nb': { const ne = document.getElementById('name'); if (ne) { myName = ne.value.trim().slice(0, 16); store.set('name', myName); } nBots = +el.dataset.n; store.set('nbots', nBots); render(); break; }
       case 'md': keepName(); matchDeals = +el.dataset.n; store.set('deals', matchDeals); render(); break;
       case 'cfg': matchDeals = +el.dataset.n; store.set('deals', matchDeals); doAct({ type: 'config', deals: matchDeals }); break;
-      case 'arr': keepName(); arrangePref = el.dataset.v; store.set('arrange', arrangePref); render(); break;
-      case 'arrToggle': arrangePref = arrangePref === 'sorted' ? 'dealt' : 'sorted'; store.set('arrange', arrangePref); modal = null; render(); toast(arrangePref === 'sorted' ? 'New deals will be sorted by suit' : 'New deals will stay as dealt'); break;
       case 'newMatch': doAct({ type: 'newMatch' }); break;
       case 'soloNew': if (readName()) { store.del('soloGame'); seenDeal = 0; soloStart(null); } break;
       case 'soloResume': if (readName()) { const g = store.get('soloGame'); if (g) { g.players[0].name = myName; soloStart(g); } } break;
@@ -1160,7 +1165,7 @@
           if (d) hostLeave('handover'); else leave('pause');
           break;
         }
-        if (mode === 'solo' && V && V.phase === 'play' && !confirm('Quit this game?')) break;
+        if (mode === 'solo' && V && inDealPhase(V.phase) && !confirm('Quit this game?')) break;
         modal = null; leave(mode === 'solo' ? 'end' : 'pause'); clearLinkFromUrl(); break;
       case 'endRoom':
         if (!confirm('End this room for everyone? Scores will be cleared.')) break;
@@ -1188,6 +1193,7 @@
       case 'move': moveSelectedTo(+el.dataset.g); break;
       case 'sort': sortHand(); break;
       case 'auto': autoArrange(); break;
+      case 'showDone': sel.clear(); doAct({ type: 'showDone' }); break;
       case 'discard': if (sel.size === 1) { const c = [...sel][0]; sel.clear(); doAct({ type: 'discard', card: c }); } break;
       case 'declareSel': openDeclare(); break;
       case 'confirmDeclare': {
@@ -1220,7 +1226,7 @@
       lastPing = 0;
       if (!peer || peer.destroyed) openHostPeer(); else if (peer.disconnected) hostServerRetry(peer, 0);
     }
-    if (V && V.phase === 'play') requestWake();
+    if (V && inDealPhase(V.phase)) requestWake();
   });
   window.addEventListener('online', () => { guestWake(); if (mode === 'host' && peer && !peer.destroyed && peer.disconnected) hostServerRetry(peer, 0); });
   let lastTick = Date.now();
@@ -1241,8 +1247,8 @@
     if (!deadline || !V || !V.deal) return;
     const left = Math.max(0, deadline - performance.now()), secs = Math.ceil(left / 1000);
     document.querySelectorAll('[data-timer]').forEach(el => { el.textContent = secs + 's'; el.classList.toggle('low', secs <= 10); });
-    document.querySelectorAll('[data-timerbar]').forEach(el => { el.style.width = (100 * left / V.deal.turnMs) + '%'; el.classList.toggle('low', secs <= 10); });
-    if (isMyTurn() && secs <= 10 && !warned) { warned = true; if (navigator.vibrate) navigator.vibrate([60, 60, 60]); toast('10 seconds left!'); }
+    document.querySelectorAll('[data-timerbar]').forEach(el => { el.style.width = (100 * left / timerMs()) + '%'; el.classList.toggle('low', secs <= 10); });
+    if ((isMyTurn() || mustGroup()) && secs <= 10 && !warned) { warned = true; if (navigator.vibrate) navigator.vibrate([60, 60, 60]); toast(mustGroup() ? '10 seconds left to group your cards!' : '10 seconds left!'); }
   }, 250);
 
   // ---------- boot ----------

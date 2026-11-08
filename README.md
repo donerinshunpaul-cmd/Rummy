@@ -45,9 +45,7 @@ The home screen has two options:
 
 **Match length:** choose **Unlimited deals**, or **Fixed deals** (3 or more). In a fixed match the **1st and last deal score double points**. After the last deal, the lowest total wins the match. In Play with Friends the host sets this in the room before the first deal.
 
-**Your cards:** choose **Sort by suit**, or **As dealt · I arrange** to receive your 13 cards exactly as dealt and arrange them yourself. You can change this any time from the ☰ menu.
-
-Drag cards to arrange them, in any order inside a group or between groups, drag a card onto the **Open pile** to throw it, and drag a card onto **Finish** to declare. You can also tap cards and use the buttons. **Auto-arrange** finds a good grouping. On a computer, double-click a card to throw it.
+Your 13 cards arrive sorted by suit. Drag cards to arrange them, in any order inside a group or between groups, drag a card onto the **Open pile** to throw it, and drag a card onto **Finish** to declare. You can also tap cards and use the buttons. **Auto-arrange** finds a good grouping. On a computer, double-click a card to throw it.
 
 ## Fair play, like a real table
 
@@ -63,7 +61,8 @@ Drag cards to arrange them, in any order inside a group or between groups, drag 
 - **Trio:** 3 identical cards (e.g. 7♥ 7♥ 7♥) count as a **pure sequence**. Only one trio counts per hand.
 - **Sequence:** jokers may fill gaps. **Set:** 3–4 cards of one rank in different suits.
 - **To declare:** all 13 cards grouped, with at least 2 sequences, at least one of them pure.
-- **Points:** A K Q J = 10, number cards = face value, jokers = 0. Losers score at least **1** and at most **80**. A player with no pure sequence counts all cards. Wrong show = **80**. Drop before your first pick = 20, a later drop = 40. Lowest total wins.
+- **Someone declared?** Everyone else gets time to group their cards and tap **Done**: 45 seconds with friends, no limit against the computer. Your points are counted from the groups you have when you tap Done or when time runs out.
+- **Points:** A K Q J = 10, number cards = face value, jokers = 0. Only cards outside valid groups count. Losers score at least **1** and at most **80**. A loser without **2 sequences** (one pure, the second pure or impure) scores the full **80**. Wrong show = **80**. Drop before your first pick = 20, a later drop = 40. Lowest total wins.
 - Printed jokers can't be picked from the open pile, and you can't throw back the card you just picked from it.
 
 ## Turn timer (Play with Friends)
