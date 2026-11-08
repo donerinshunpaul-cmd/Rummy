@@ -1,6 +1,7 @@
 /* Rummy Room — Indian Rummy rules engine + computer player.
    13 cards · 3 decks with 2 printed jokers each · closed wild joker (revealed to a player
-   after their first pure sequence) · trio (3 identical cards) counts as a pure sequence, max 1 ·
+   after their first pure sequence) · 3 identical cards (same number and suit) = a pure group ·
+   only one set (same number, different suits) per hand ·
    wrong show 80 · losers score min 1, max 80 · drops 20 / 40. */
 (function (root) {
   'use strict';
@@ -87,15 +88,14 @@
 
   /** Evaluate an arrangement (array of groups of card ids) for a player who knows wild rank wr. */
   function evaluate(groups, wr) {
-    let trioSeen = false;
-    const info = groups.filter(g => g.length).map(g => {
-      let t = classify(g, wr);
-      if (t === 'trio') { if (trioSeen) t = 'invalid'; else trioSeen = true; }
-      return { ids: g, type: t };
-    });
+    const info = groups.filter(g => g.length).map(g => ({ ids: g, type: classify(g, wr) }));
+    const val = x => x.ids.reduce((b, id) => b + cardPoints(parse(id), wr), 0);
+    // only one set counts per hand: the most valuable one stays, any other set is not valid
+    info.filter(x => x.type === 'set').sort((a, b) => val(b) - val(a)).slice(1)
+      .forEach(x => { x.type = 'invalid'; x.extraSet = true; });
     const pure = info.filter(x => isPureType(x.type)).length;
     const seqs = info.filter(x => isSeqType(x.type)).length;
-    const sum = list => list.reduce((a, g) => a + g.ids.reduce((b, id) => b + cardPoints(parse(id), wr), 0), 0);
+    const sum = list => list.reduce((a, g) => a + val(g), 0);
     const valid = pure >= 1 && seqs >= 2 && info.every(x => x.type !== 'invalid');
     // without both "lives" (a pure sequence plus a second sequence, pure or not) a loser pays the full count
     const pts = pure === 0 || seqs < 2 ? FULL_COUNT : sum(info.filter(x => x.type === 'invalid'));
@@ -137,7 +137,7 @@
       else (nat[c.s + c.r] = nat[c.s + c.r] || []).push(id);
     });
     const melds = [], dead = [];
-    let trioUsed = false, nodes = 0, best = null;
+    let setUsed = false, nodes = 0, best = null;   // only one set per hand
 
     function jokerCount() { let n = printed.length; for (const k in wild) n += wild[k].length; return n; }
     function takeJoker() {
@@ -192,10 +192,10 @@
       if (!key) { leaf(); return; }
       const s = key[0], r = +key.slice(1);
       const pid = nat[key].pop();
-      // 1) trio
-      if (!trioUsed && nat[key].length >= 2) {
+      // 1) three identical cards (same number, same suit) = a pure group
+      if (nat[key].length >= 2) {
         const a = nat[key].pop(), b = nat[key].pop();
-        trioUsed = true; melds.push({ ids: [pid, a, b], type: 'trio' }); dfs(); melds.pop(); trioUsed = false;
+        melds.push({ ids: [pid, a, b], type: 'trio' }); dfs(); melds.pop();
         nat[key].push(b, a);
       }
       // 2) sequences containing the pivot
@@ -224,15 +224,15 @@
           }
         }
       }
-      // 3) sets containing the pivot
-      const others = SUITS.filter(x => x !== s && nat[x + r] && nat[x + r].length);
-      for (let mask = 0; mask < (1 << others.length); mask++) {
+      // 3) sets containing the pivot (only if the hand has no set yet)
+      const others = setUsed ? [] : SUITS.filter(x => x !== s && nat[x + r] && nat[x + r].length);
+      for (let mask = 0; !setUsed && mask < (1 << others.length); mask++) {
         const pick = others.filter((_, i) => mask & (1 << i));
         const n = 1 + pick.length; if (n > 4) continue;
         const need = Math.max(0, 3 - n); if (need > jAvail) continue;
         const taken = pick.map(x => { const arr = nat[x + r]; return { id: arr.pop(), back: id => arr.push(id) }; });
         for (let k = 0; k < need; k++) taken.push(takeJoker());
-        melds.push({ ids: [pid].concat(taken.map(t => t.id)), type: 'set' }); dfs(); melds.pop();
+        setUsed = true; melds.push({ ids: [pid].concat(taken.map(t => t.id)), type: 'set' }); dfs(); melds.pop(); setUsed = false;
         for (let i = taken.length - 1; i >= 0; i--) taken[i].back(taken[i].id);
       }
       // 4) pivot as deadwood

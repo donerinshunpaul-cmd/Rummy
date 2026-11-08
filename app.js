@@ -695,7 +695,8 @@
     return '<div class="' + cls.join(' ') + '"' + attrs + '><span class="r">' + R.RANK_LABEL[c.r] + '<br>' + sym + '</span><span class="big">' + sym + '</span>' + (wild ? '<span class="jk">J</span>' : '') + '</div>';
   }
   const backHTML = (extra, key) => '<div class="card back"' + (key ? ' data-k="' + key + '"' : '') + '>' + (extra || '') + '</div>';
-  const TYPE_LABEL = { pure: 'Pure sequence', trio: 'Trio · pure', impure: 'Sequence', set: 'Set', invalid: 'Invalid' };
+  const TYPE_LABEL = { pure: 'Pure sequence', trio: 'Pure group', impure: 'Sequence', set: 'Set', invalid: 'Invalid' };
+  const EXTRA_SET = 'Only 1 set';   // a second set in one hand doesn't count
 
   // ---------- render ----------
   function render() {
@@ -835,11 +836,11 @@
     if (inDeal) {
       const ev = R.evaluate(D.myGroups, wrKnown());
       hand = D.myGroups.map((g, i) => {
-        const t = g.length >= 3 ? ev.info[i].type : null;
+        const inf = g.length >= 3 ? ev.info[i] : null, t = inf ? inf.type : null;
         const canMove = sel.size && g.some(id => !sel.has(id));
         return '<div class="grp" data-grp="' + i + '">' + (canMove ? '<button class="moveto" data-a="move" data-g="' + i + '">＋ here</button>' : '') +
           '<div class="cards" style="--ov:' + (g.length > 9 ? 0.64 : g.length > 6 ? 0.56 : 0.5) + '">' + g.map(id => cardHTML(id, { hand: true, key: 'c:' + id, isNew: id === D.lastDrawn && mine && D.step === 'discard' })).join('') + '</div>' +
-          '<div class="glabel ' + (t || '') + '">' + (t ? TYPE_LABEL[t] + (t === 'invalid' ? '' : ' ✓') : g.length + ' card' + (g.length > 1 ? 's' : '')) + '</div></div>';
+          '<div class="glabel ' + (t || '') + '">' + (t ? (inf.extraSet ? EXTRA_SET : TYPE_LABEL[t] + (t === 'invalid' ? '' : ' ✓')) : g.length + ' card' + (g.length > 1 ? 's' : '')) + '</div></div>';
       }).join('') + '<div class="newgrp" data-drop="new">＋<br>New group</div>';
     }
 
@@ -871,7 +872,7 @@
   function groupsHTML(groups) {
     return '<div class="gs">' + groups.map(g => {
       const t = g.ids.length >= 3 ? g.type : 'invalid';
-      return '<div class="g"><div class="cards">' + g.ids.map(id => cardHTML(id, { sm: true })).join('') + '</div><div class="glabel ' + t + '">' + (g.ids.length >= 3 ? TYPE_LABEL[t] : 'Ungrouped') + '</div></div>';
+      return '<div class="g"><div class="cards">' + g.ids.map(id => cardHTML(id, { sm: true })).join('') + '</div><div class="glabel ' + t + '">' + (g.ids.length < 3 ? 'Ungrouped' : g.extraSet ? EXTRA_SET : TYPE_LABEL[t]) + '</div></div>';
     }).join('') + '</div>';
   }
   function renderModal() {
@@ -901,7 +902,7 @@
       const rest = D.myGroups.map(g => g.filter(id => id !== card)).filter(g => g.length);
       const ev = R.evaluate(rest, wrKnown());
       const why = [];
-      if (ev.pure < 1) why.push('you need a pure sequence'); if (ev.seqs < 2) why.push('you need 2 sequences'); if (ev.info.some(x => x.type === 'invalid')) why.push('some groups are not valid');
+      if (ev.pure < 1) why.push('you need a pure sequence'); if (ev.seqs < 2) why.push('you need 2 sequences'); if (ev.info.some(x => x.extraSet)) why.push('only one set is allowed'); if (ev.info.some(x => x.type === 'invalid' && !x.extraSet)) why.push('some groups are not valid');
       html = '<div class="modal-bg"><div class="modal"><h2>Declare?</h2><div class="row sub" style="margin-bottom:8px">Finishing card ' + cardHTML(card, { sm: true }) + '</div>' + groupsHTML(ev.info) +
         '<p style="font-weight:700;color:' + (ev.valid ? 'var(--ok)' : 'var(--danger)') + '">' + (ev.valid ? '✓ Valid — you win this deal!' : '✕ Not valid: ' + why.join(', ') + '. A wrong show costs 80 points.') + '</p>' +
         '<div class="row" style="justify-content:flex-end"><button class="ghost" data-a="close">Cancel</button><button class="' + (ev.valid ? 'go' : 'danger') + '" data-a="confirmDeclare">Declare</button></div></div></div>';
@@ -927,7 +928,7 @@
         '<p><b>Closed joker:</b> one card is placed face-down under the deck. You see it only after you arrange your first <b>pure sequence</b>. Then every card of that rank is a joker for you.</p>' +
         '<p><b>Your turn:</b> pick from the Deck or the Open card, then throw one card onto the Open pile. Drag a card onto the pile, or tap it and press Discard.</p>' +
         '<p><b>Arranging:</b> drag cards between groups, onto <b>＋ New group</b>, or select several and press Group. <b>Auto-arrange</b> finds a good grouping.</p>' +
-        '<p><b>Pure sequence:</b> 3+ in a row, same suit, no joker (4♥ 5♥ 6♥). <b>Trio:</b> 3 identical cards (7♥ 7♥ 7♥) count as a pure sequence; only one trio counts. <b>Sequence:</b> jokers may fill gaps. <b>Set:</b> 3–4 of the same rank, different suits.</p>' +
+        '<p><b>Pure sequence:</b> 3+ in a row, same suit, no joker (4♥ 5♥ 6♥). <b>Pure group:</b> 3 identical cards, same number and same suit (7♥ 7♥ 7♥), count as a pure sequence. <b>Sequence:</b> jokers may fill gaps. <b>Set:</b> 3–4 of the same number, different suits (9♣ 9♦ 9♠). <b>Only one set counts per hand</b>; a second set is not valid.</p>' +
         '<p><b>To win:</b> group all 13 cards with at least 2 sequences, one of them pure. After picking your 14th card, drag a card to <b>Finish</b> (or select it and press Declare).</p>' +
         '<p><b>Someone declared?</b> You get 45 seconds (no limit against the computer) to group your cards, then tap <b>Done</b>. Your points are counted from your final groups.</p>' +
         '<p><b>Points:</b> A K Q J = 10, number cards = face value, jokers = 0. Losers with 2 sequences (one pure) score their ungrouped cards (min 1, max 80). Without 2 sequences, a loser scores the full <b>80</b>. Wrong show = 80. Drop before your first pick = 20, later = 40. Lowest total wins.</p>' +
