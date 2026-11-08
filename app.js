@@ -695,7 +695,7 @@
     return '<div class="' + cls.join(' ') + '"' + attrs + '><span class="r">' + R.RANK_LABEL[c.r] + '<br>' + sym + '</span><span class="big">' + sym + '</span>' + (wild ? '<span class="jk">J</span>' : '') + '</div>';
   }
   const backHTML = (extra, key) => '<div class="card back"' + (key ? ' data-k="' + key + '"' : '') + '>' + (extra || '') + '</div>';
-  const TYPE_LABEL = { pure: 'Pure sequence', trio: 'Pure group', impure: 'Sequence', set: 'Set', invalid: 'Invalid' };
+  const TYPE_LABEL = { pure: 'Pure sequence', trio: 'Pure group', itrio: 'Impure group', impure: 'Sequence', set: 'Set', invalid: 'Invalid' };
   const EXTRA_SET = 'Only 1 set';   // a second set in one hand doesn't count
 
   // ---------- render ----------
@@ -928,7 +928,7 @@
         '<p><b>Closed joker:</b> one card is placed face-down under the deck. You see it only after you arrange your first <b>pure sequence</b>. Then every card of that rank is a joker for you.</p>' +
         '<p><b>Your turn:</b> pick from the Deck or the Open card, then throw one card onto the Open pile. Drag a card onto the pile, or tap it and press Discard.</p>' +
         '<p><b>Arranging:</b> drag cards between groups, onto <b>＋ New group</b>, or select several and press Group. <b>Auto-arrange</b> finds a good grouping.</p>' +
-        '<p><b>Pure sequence:</b> 3+ in a row, same suit, no joker (4♥ 5♥ 6♥). <b>Pure group:</b> 3 identical cards, same number and same suit (7♥ 7♥ 7♥), count as a pure sequence. <b>Sequence:</b> jokers may fill gaps. <b>Set:</b> 3–4 of the same number, different suits (9♣ 9♦ 9♠). <b>Only one set counts per hand</b>; a second set is not valid.</p>' +
+        '<p><b>Pure sequence:</b> 3+ in a row, same suit, no joker (4♥ 5♥ 6♥). <b>Pure group:</b> 3 identical cards, same number and same suit (7♥ 7♥ 7♥), count as a pure sequence. <b>Sequence:</b> jokers may fill gaps. <b>Impure group:</b> 2 identical cards plus a joker (2♦ 2♦ ★) count as a sequence with a joker. <b>Set:</b> 3–4 of the same number, different suits (9♣ 9♦ 9♠). <b>Only one set counts per hand</b>; a second set is not valid.</p>' +
         '<p><b>To win:</b> group all 13 cards with at least 2 sequences, one of them pure. After picking your 14th card, drag a card to <b>Finish</b> (or select it and press Declare).</p>' +
         '<p><b>Someone declared?</b> You get 45 seconds (no limit against the computer) to group your cards, then tap <b>Done</b>. Your points are counted from your final groups.</p>' +
         '<p><b>Points:</b> A K Q J = 10, number cards = face value, jokers = 0. Losers with 2 sequences (one pure) score their ungrouped cards (min 1, max 80). Without 2 sequences, a loser scores the full <b>80</b>. Wrong show = 80. Drop before your first pick = 20, later = 40. Lowest total wins.</p>' +

@@ -1,6 +1,7 @@
 /* Rummy Room — Indian Rummy rules engine + computer player.
    13 cards · 3 decks with 2 printed jokers each · closed wild joker (revealed to a player
-   after their first pure sequence) · 3 identical cards (same number and suit) = a pure group ·
+   after their first pure sequence) · 3 identical cards (same number and suit) = a pure group,
+   2+ identical cards plus joker(s) = an impure group (counts like an impure sequence) ·
    only one set (same number, different suits) per hand ·
    wrong show 80 · losers score min 1, max 80 · drops 20 / 40. */
 (function (root) {
@@ -75,16 +76,23 @@
     if (nat.some(c => c.r !== nat[0].r)) return false;
     return new Set(nat.map(c => c.s)).size === nat.length;
   }
+  // two or more identical cards (same number, same suit) plus joker(s): an impure group, like an impure sequence
+  function isImpureTrio(cards, wr) {
+    if (cards.length < 3) return false;
+    const nat = cards.filter(c => !isJoker(c, wr));
+    return nat.length >= 2 && nat.length < cards.length && nat.every(c => c.s === nat[0].s && c.r === nat[0].r);
+  }
   function classify(ids, wr) {
     const cards = ids.map(parse);
     if (isTrio(cards)) return 'trio';
     if (isPureSeq(cards)) return 'pure';
     if (isImpureSeq(cards, wr)) return 'impure';
+    if (isImpureTrio(cards, wr)) return 'itrio';
     if (isSet(cards, wr)) return 'set';
     return 'invalid';
   }
   const isPureType = t => t === 'pure' || t === 'trio';
-  const isSeqType = t => t === 'pure' || t === 'trio' || t === 'impure';
+  const isSeqType = t => t === 'pure' || t === 'trio' || t === 'impure' || t === 'itrio';
 
   /** Evaluate an arrangement (array of groups of card ids) for a player who knows wild rank wr. */
   function evaluate(groups, wr) {
@@ -197,6 +205,12 @@
         const a = nat[key].pop(), b = nat[key].pop();
         melds.push({ ids: [pid, a, b], type: 'trio' }); dfs(); melds.pop();
         nat[key].push(b, a);
+      }
+      // 1b) two identical cards plus a joker = an impure group
+      if (nat[key].length >= 1 && jokerCount()) {
+        const a = nat[key].pop(), j = takeJoker();
+        melds.push({ ids: [pid, a, j.id], type: 'itrio' }); dfs(); melds.pop();
+        j.back(j.id); nat[key].push(a);
       }
       // 2) sequences containing the pivot
       const vs = r === 1 ? [1, 14] : [r];
@@ -496,7 +510,6 @@
       if (D.step !== 'discard') return 'Pick a card first';
       const c = a.card, all = flat(hand);
       if (all.indexOf(c) < 0) return 'Card not in hand';
-      if (a.type === 'discard' && D.picked === c) return "You can't throw back the card you just picked";
       let rest = hand.map(g => g.filter(x => x !== c)).filter(g => g.length);
       if (a.groups) { const g = cleanGroups(a.groups); if (sameCards(flat(g), flat(rest))) rest = g; }
       D.hands[pid] = rest; D.discard.push(c);

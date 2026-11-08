@@ -59,12 +59,13 @@ Your 13 cards arrive sorted by suit. Drag cards to arrange them, in any order in
 - **Closed joker:** one card is placed face-down under the deck. Each player sees it only after they arrange their first **pure sequence**. From then on, every card of that rank is a joker for that player. If the closed card is a printed joker, Aces are the jokers.
 - **Pure sequence:** 3+ consecutive cards of one suit with no joker.
 - **Pure group:** 3 identical cards, same number and same suit (e.g. 7♥ 7♥ 7♥), count as a **pure sequence**.
+- **Impure group:** 2 identical cards plus a joker (e.g. 2♦ 2♦ joker) count as a **sequence with a joker**.
 - **Sequence:** jokers may fill gaps. **Set:** 3–4 cards of the same number in different suits (e.g. 9♣ 9♦ 9♠).
 - **Only one set per hand.** A second set is not valid: you can't declare with it, and its cards count as points.
 - **To declare:** all 13 cards grouped, with at least 2 sequences, at least one of them pure.
 - **Someone declared?** Everyone else gets time to group their cards and tap **Done**: 45 seconds with friends, no limit against the computer. Your points are counted from the groups you have when you tap Done or when time runs out.
 - **Points:** A K Q J = 10, number cards = face value, jokers = 0. Only cards outside valid groups count. Losers score at least **1** and at most **80**. A loser without **2 sequences** (one pure, the second pure or impure) scores the full **80**. Wrong show = **80**. Drop before your first pick = 20, a later drop = 40. Lowest total wins.
-- Printed jokers can't be picked from the open pile, and you can't throw back the card you just picked from it.
+- Printed jokers can't be picked from the open pile. You may throw back the card you just picked from it.
 
 ## Turn timer (Play with Friends)
 
