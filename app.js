@@ -902,7 +902,7 @@
       const rest = D.myGroups.map(g => g.filter(id => id !== card)).filter(g => g.length);
       const ev = R.evaluate(rest, wrKnown());
       const why = [];
-      if (ev.pure < 1) why.push('you need a pure sequence'); if (ev.seqs < 2) why.push('you need 2 sequences'); if (ev.info.some(x => x.extraSet)) why.push('only one set is allowed'); if (ev.info.some(x => x.type === 'invalid' && !x.extraSet)) why.push('some groups are not valid');
+      if (ev.pure3 < 1) why.push(ev.pure ? 'you need a pure sequence of exactly 3 cards' : 'you need a pure sequence'); if (ev.seqs < 2) why.push('you need 2 sequences'); if (ev.info.some(x => x.extraSet)) why.push('only one set is allowed'); if (ev.info.some(x => x.type === 'invalid' && !x.extraSet)) why.push('some groups are not valid');
       html = '<div class="modal-bg"><div class="modal"><h2>Declare?</h2><div class="row sub" style="margin-bottom:8px">Finishing card ' + cardHTML(card, { sm: true }) + '</div>' + groupsHTML(ev.info) +
         '<p style="font-weight:700;color:' + (ev.valid ? 'var(--ok)' : 'var(--danger)') + '">' + (ev.valid ? '✓ Valid — you win this deal!' : '✕ Not valid: ' + why.join(', ') + '. A wrong show costs 80 points.') + '</p>' +
         '<div class="row" style="justify-content:flex-end"><button class="ghost" data-a="close">Cancel</button><button class="' + (ev.valid ? 'go' : 'danger') + '" data-a="confirmDeclare">Declare</button></div></div></div>';
@@ -925,13 +925,13 @@
     } else if (modal === 'rules') {
       html = '<div class="modal-bg"><div class="modal rules"><h2>How to play</h2>' +
         '<p><b>Cards:</b> 3 decks with 2 printed jokers each (162 cards). The deck is shuffled once before each deal and its order never changes during the deal. Cards are dealt one at a time, 13 each.</p>' +
-        '<p><b>Closed joker:</b> one card is placed face-down under the deck. You see it only after you arrange your first <b>pure sequence</b>. Then every card of that rank is a joker for you.</p>' +
+        '<p><b>Closed joker:</b> one card is placed face-down under the deck. You see it only after you arrange your first <b>pure sequence</b> (3 or more cards). Then every card of that rank is a joker for you.</p>' +
         '<p><b>Your turn:</b> pick from the Deck or the Open card, then throw one card onto the Open pile. Drag a card onto the pile, or tap it and press Discard.</p>' +
         '<p><b>Arranging:</b> drag cards between groups, onto <b>＋ New group</b>, or select several and press Group. <b>Auto-arrange</b> finds a good grouping.</p>' +
         '<p><b>Pure sequence:</b> 3+ in a row, same suit, no joker (4♥ 5♥ 6♥). <b>Pure group:</b> 3 identical cards, same number and same suit (7♥ 7♥ 7♥), count as a pure sequence. <b>Sequence:</b> jokers may fill gaps. <b>Impure group:</b> 2 identical cards plus a joker (2♦ 2♦ ★) count as a sequence with a joker. <b>Set:</b> 3–4 of the same number, different suits (9♣ 9♦ 9♠). <b>Only one set counts per hand</b>; a second set is not valid.</p>' +
-        '<p><b>To win:</b> group all 13 cards with at least 2 sequences, one of them pure. After picking your 14th card, drag a card to <b>Finish</b> (or select it and press Declare).</p>' +
+        '<p><b>To win:</b> group all 13 cards with at least 2 sequences, one of them a <b>pure sequence of exactly 3 cards</b> (a longer pure sequence still counts as your second sequence). After picking your 14th card, drag a card to <b>Finish</b> (or select it and press Declare).</p>' +
         '<p><b>Someone declared?</b> You get 45 seconds (no limit against the computer) to group your cards, then tap <b>Done</b>. Your points are counted from your final groups.</p>' +
-        '<p><b>Points:</b> A K Q J = 10, number cards = face value, jokers = 0. Losers with 2 sequences (one pure) score their ungrouped cards (min 1, max 80). Without 2 sequences, a loser scores the full <b>80</b>. Wrong show = 80. Drop before your first pick = 20, later = 40. Lowest total wins.</p>' +
+        '<p><b>Points:</b> A K Q J = 10, number cards = face value, jokers = 0. Losers with 2 sequences (one a 3-card pure) score their ungrouped cards (min 1, max 80). Without them, a loser scores the full <b>80</b>. Wrong show = 80. Drop before your first pick = 20, later = 40. Lowest total wins.</p>' +
         '<p><b>Match:</b> play unlimited deals, or a fixed number (3 or more). In a fixed match the <b>1st and last deal score double</b>. Lowest total after the last deal wins the match.</p>' +
         '<p><b>Your cards</b> arrive sorted by suit. Drag cards to any position, inside a group or between groups.</p>' +
         '<p><b>Turn timer (Play with Friends):</b> 45 seconds per turn. If time runs out, the turn passes: a card you picked goes back to the open pile; if you had not picked, the top deck card is turned onto the open pile.</p>' +

@@ -2,6 +2,7 @@
    13 cards · 3 decks with 2 printed jokers each · closed wild joker (revealed to a player
    after their first pure sequence) · 3 identical cards (same number and suit) = a pure group,
    2+ identical cards plus joker(s) = an impure group (counts like an impure sequence) ·
+   any pure sequence reveals the joker, but declaring needs one pure sequence of exactly 3 cards ·
    only one set (same number, different suits) per hand ·
    wrong show 80 · losers score min 1, max 80 · drops 20 / 40. */
 (function (root) {
@@ -102,12 +103,13 @@
     info.filter(x => x.type === 'set').sort((a, b) => val(b) - val(a)).slice(1)
       .forEach(x => { x.type = 'invalid'; x.extraSet = true; });
     const pure = info.filter(x => isPureType(x.type)).length;
+    const pure3 = info.filter(x => isPureType(x.type) && x.ids.length === 3).length;   // the first life must be exactly 3 cards
     const seqs = info.filter(x => isSeqType(x.type)).length;
     const sum = list => list.reduce((a, g) => a + val(g), 0);
-    const valid = pure >= 1 && seqs >= 2 && info.every(x => x.type !== 'invalid');
-    // without both "lives" (a pure sequence plus a second sequence, pure or not) a loser pays the full count
-    const pts = pure === 0 || seqs < 2 ? FULL_COUNT : sum(info.filter(x => x.type === 'invalid'));
-    return { valid, info, pure, seqs, pts: valid ? 0 : Math.min(FULL_COUNT, pts) };
+    const valid = pure3 >= 1 && seqs >= 2 && info.every(x => x.type !== 'invalid');
+    // without both "lives" (a 3-card pure sequence plus a second sequence, pure or not) a loser pays the full count
+    const pts = pure3 === 0 || seqs < 2 ? FULL_COUNT : sum(info.filter(x => x.type === 'invalid'));
+    return { valid, info, pure, pure3, seqs, pts: valid ? 0 : Math.min(FULL_COUNT, pts) };
   }
 
   // ---------- display helpers ----------
@@ -168,15 +170,20 @@
         let g = groups.find(x => x.type === 'impure' && x.ids.length < 13);
         if (!g) g = groups.find(x => x.type === 'set' && x.ids.length < 4);
         if (!g && left.length >= 2) { groups.push({ ids: [j, left.pop(), left.pop()], type: 'impure' }); continue; }
-        if (!g && groups.filter(x => isPureType(x.type)).length >= 2) { g = groups.find(x => x.type === 'pure'); if (g) g.type = 'impure'; }
+        if (!g && groups.filter(x => isPureType(x.type)).length >= 2) {
+          // put the joker on a pure sequence, but keep a 3-card pure one
+          const pures = groups.filter(x => x.type === 'pure'), n3 = groups.filter(x => isPureType(x.type) && x.ids.length === 3).length;
+          g = pures.find(x => x.ids.length !== 3) || (n3 >= 2 ? pures[0] : null);
+          if (g) g.type = 'impure';
+        }
         if (g) g.ids.push(j); else extra.push(j);
       }
-      const pure = groups.filter(x => isPureType(x.type)).length;
+      const pure3 = groups.filter(x => isPureType(x.type) && x.ids.length === 3).length;
       const seqs = groups.filter(x => isSeqType(x.type)).length;
       const pts = id => cardPoints(parse(id), wr);
       const deadPts = dead.reduce((a, id) => a + pts(id), 0) + extra.reduce((a, id) => a + pts(id), 0);
-      const valid = pure >= 1 && seqs >= 2 && !dead.length && !extra.length;
-      let cost = pure === 0 || seqs < 2 ? FULL_COUNT : deadPts;   // same rule as evaluate(): no two sequences = full count
+      const valid = pure3 >= 1 && seqs >= 2 && !dead.length && !extra.length;
+      let cost = pure3 === 0 || seqs < 2 ? FULL_COUNT : deadPts;   // same rule as evaluate(): no 3-card pure + second sequence = full count
       cost = valid ? 0 : Math.min(FULL_COUNT, cost);
       let score;
       if (mode === 'ai') {
@@ -187,7 +194,7 @@
           const near = dc.some((o, j) => j !== i && ((o.s === c.s && Math.abs(o.r - c.r) <= 2) || (o.r === c.r && o.s !== c.s)));
           w += cardPoints(c, wr) * (near ? 0.45 : 1);
         });
-        score = valid ? -1 : w + (pure ? 0 : 28) + (seqs >= 2 ? 0 : 12) + extra.length;
+        score = valid ? -1 : w + (pure3 ? 0 : 28) + (seqs >= 2 ? 0 : 12) + extra.length;
       } else score = valid ? -1 : cost * 1000 + deadPts;
       if (!best || score < best.score) {
         best = { score, cost, valid, groups: groups.map(g => g.ids).concat(extra.length ? [extra] : []), dead: dead.slice() };
@@ -338,7 +345,7 @@
       if (D.out[pid]) { pts = D.out[pid]; note = pts === FIRST_DROP ? 'First drop' : 'Middle drop'; }
       else if (wrongBy) { pts = pid === wrongBy ? FULL_COUNT : 0; note = pid === wrongBy ? 'Wrong show' : ''; }
       else if (pid === winner) { pts = 0; note = 'Winner'; }
-      else { pts = Math.max(MIN_LOSS, ev.pts); note = ev.pure < 1 || ev.seqs < 2 ? 'Full count · no 2 sequences' : ''; }
+      else { pts = Math.max(MIN_LOSS, ev.pts); note = ev.pure3 < 1 ? 'Full count · no 3-card pure sequence' : ev.seqs < 2 ? 'Full count · no 2 sequences' : ''; }
       return { pid, name: nameOf(G, pid), pts, note, groups: ev.info };
     });
     const mult = D.mult || 1;
